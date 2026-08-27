@@ -1,0 +1,143 @@
+{
+  "annotations": {"list": []},
+  "description": "Operator flow, event-time watermarks, backpressure, checkpoints, and recovery. Keep the Flink job graph open beside this dashboard.",
+  "editable": false,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "A running job should be one; zero during recovery is expected briefly.",
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0}, "id": 1,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "max(flink_jobmanager_numRunningJobs) or vector(0)", "legendFormat": "running", "refId": "A"}],
+      "title": "Job running", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Recovery count should change when a TaskManager or sink outage forces restart.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0}, "id": 2,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "sum({__name__=~\"flink_.*fullRestarts\"}) or vector(0)", "legendFormat": "restarts", "refId": "A"}],
+      "title": "Full restarts", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Completed checkpoints make Kafka source positions durable and publish group offsets.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0}, "id": 3,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "sum({__name__=~\"flink_.*numberOfCompletedCheckpoints\"}) or vector(0)", "legendFormat": "completed", "refId": "A"}],
+      "title": "Completed checkpoints", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Failures during sink outages explain why committed offsets stop moving.",
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0}, "id": 4,
+      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "sum({__name__=~\"flink_.*numberOfFailedCheckpoints\"}) or vector(0)", "legendFormat": "failed", "refId": "A"}],
+      "title": "Failed checkpoints", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Named operators let you see where flow stops or fan-out changes counts.",
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5}, "id": 5,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (operator_name) (rate({__name__=~\"flink_.*numRecordsIn\"}[1m]))", "legendFormat": "in {{operator_name}}", "refId": "A"},
+        {"expr": "sum by (operator_name) (rate({__name__=~\"flink_.*numRecordsOut\"}[1m]))", "legendFormat": "out {{operator_name}}", "refId": "B"}
+      ],
+      "title": "Operator records in / out", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "The minimum input watermark controls event-time progress; idle partitions stop holding it back after 30 seconds.",
+      "fieldConfig": {"defaults": {"unit": "dateTimeAsIso"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5}, "id": 6,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "{__name__=~\"flink_.*current(Input|Output)Watermark\"}", "legendFormat": "{{operator_name}} {{__name__}}", "refId": "A"}],
+      "title": "Operator watermarks", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Near 1000 ms/s backpressured means downstream cannot accept data; busy and idle distinguish compute from waiting.",
+      "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13}, "id": 7,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (operator_name) ({__name__=~\"flink_.*backPressuredTimeMsPerSecond\"})", "legendFormat": "backpressure {{operator_name}}", "refId": "A"},
+        {"expr": "sum by (operator_name) ({__name__=~\"flink_.*busyTimeMsPerSecond\"})", "legendFormat": "busy {{operator_name}}", "refId": "B"},
+        {"expr": "sum by (operator_name) ({__name__=~\"flink_.*idleTimeMsPerSecond\"})", "legendFormat": "idle {{operator_name}}", "refId": "C"}
+      ],
+      "title": "Operator pressure / utilization", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Duration spikes or a rising in-progress count often precede timeout and restart.",
+      "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": [{"matcher": {"id": "byFrameRefID", "options": "B"}, "properties": [{"id": "unit", "value": "bytes"}]}]},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13}, "id": 8,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "max({__name__=~\"flink_.*lastCheckpointDuration\"})", "legendFormat": "last duration", "refId": "A"},
+        {"expr": "max({__name__=~\"flink_.*lastCheckpointSize\"})", "legendFormat": "last size (bytes)", "refId": "B"}
+      ],
+      "title": "Checkpoint behavior", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Current offsets move as records are read; committed offsets advance after successful checkpoints. Compare partitions during the hot-key exercise.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 21}, "id": 9,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "max by (partition) (flink_taskmanager_job_task_operator_KafkaSourceReader_topic_partition_currentOffset)", "legendFormat": "current p{{partition}}", "refId": "A"},
+        {"expr": "max by (partition) (flink_taskmanager_job_task_operator_KafkaSourceReader_topic_partition_committedOffset)", "legendFormat": "committed p{{partition}}", "refId": "B"}
+      ],
+      "title": "Kafka source offsets by partition", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "pendingRecords and Kafka records_lag_max are source-subtask backlog signals. A subtask may own more than one partition.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 21}, "id": 10,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (subtask_index) (flink_taskmanager_job_task_operator_pendingRecords)", "legendFormat": "pending subtask {{subtask_index}}", "refId": "A"},
+        {"expr": "max by (subtask_index) (flink_taskmanager_job_task_operator_KafkaSourceReader_KafkaConsumer_records_lag_max)", "legendFormat": "lag max subtask {{subtask_index}}", "refId": "B"}
+      ],
+      "title": "Kafka source backlog by subtask", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Wall-clock distance from each lateness-observation subtask's current input watermark. After all inputs go idle, a streaming watermark can remain static.",
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 29}, "id": 11,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "max by (subtask_index) ((time() * 1000 - flink_taskmanager_job_task_operator_currentInputWatermark{operator_name=\"observe_watermark_and_lateness\"}) / 1000)", "legendFormat": "subtask {{subtask_index}}", "refId": "A"}],
+      "title": "Input watermark lag", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Bounded-cardinality custom counter incremented when event_time is at or behind the watermark observed by Flink.",
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 29}, "id": 12,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "sum(rate(flink_taskmanager_job_task_operator_lab_records_late[1m]))", "legendFormat": "observed late/s", "refId": "A"}],
+      "title": "Observed late records", "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": ["learning-lab", "flink"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "browser",
+  "title": "03 · Flink operators and recovery",
+  "uid": "lab-flink",
+  "version": 1
+}

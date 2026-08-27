@@ -1,0 +1,306 @@
+name: kafka-flink-clickhouse-lab-monitoring
+
+x-flink-environment: &flink-environment
+  KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+  KAFKA_TOPIC: telemetry.raw
+  KAFKA_DLQ_TOPIC: telemetry.dlq
+  KAFKA_GROUP_ID: telemetry-flink-monitoring-v1
+  CLICKHOUSE_JDBC_URL: jdbc:clickhouse://clickhouse:8123/perfmon
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER:-flink}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-flink}
+  FLINK_PARALLELISM: ${FLINK_PARALLELISM:-4}
+  OUT_OF_ORDER_SECONDS: ${OUT_OF_ORDER_SECONDS:-10}
+  WATERMARK_IDLE_SECONDS: ${WATERMARK_IDLE_SECONDS:-30}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+# The generous heartbeat covers the first PyFlink/Beam worker startup under
+# Apple Silicon emulation. For the same environment, Java's fork launcher is
+# more reliable than the default posix_spawn helper used through QEMU.
+x-flink-properties: &flink-properties |
+  jobmanager.rpc.address: jobmanager
+  taskmanager.numberOfTaskSlots: ${FLINK_PARALLELISM:-4}
+  parallelism.default: ${FLINK_PARALLELISM:-4}
+  execution.checkpointing.interval: 10s
+  execution.checkpointing.mode: EXACTLY_ONCE
+  execution.checkpointing.min-pause: 2s
+  execution.checkpointing.timeout: 60s
+  execution.checkpointing.max-concurrent-checkpoints: 1
+  execution.checkpointing.dir: file:///opt/flink/checkpoints
+  execution.checkpointing.savepoint-dir: file:///opt/flink/savepoints
+  restart-strategy.type: fixed-delay
+  restart-strategy.fixed-delay.attempts: 100
+  restart-strategy.fixed-delay.delay: 5s
+  heartbeat.timeout: 120s
+  env.java.opts.taskmanager: -Djdk.lang.Process.launchMechanism=fork
+  metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+  metrics.reporter.prom.port: 9249
+  metrics.reporter.prom.scope.variables.additional: lab:kafka-flink-clickhouse-monitoring
+  metrics.reporter.prom.scope.variables.excludes: job_id;task_id;task_attempt_id;task_attempt_num;operator_id;tm_id
+
+services:
+  kafka:
+    image: telemetry-monitoring-kafka:3.9.2-jmx
+    build:
+      context: ./kafka
+    hostname: kafka
+    ports:
+      - "127.0.0.1:29092:9092"
+      - "127.0.0.1:19404:9404"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://:19092,CONTROLLER://:9093,PLAINTEXT_HOST://:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:19092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_OPTS: -javaagent:/opt/jmx-exporter/jmx_prometheus_javaagent-1.6.0.jar=9404:/opt/jmx-exporter/kafka.yml
+    volumes:
+      - monitoring_kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "KAFKA_OPTS= /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    labels:
+      lab.service: kafka
+
+  kafka-init:
+    image: telemetry-monitoring-kafka:3.9.2-jmx
+    build:
+      context: ./kafka
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -euo pipefail
+        for topic in telemetry.raw telemetry.dlq; do
+          /opt/kafka/bin/kafka-topics.sh \
+            --bootstrap-server kafka:19092 \
+            --create --if-not-exists \
+            --topic "$${topic}" \
+            --partitions 6 \
+            --replication-factor 1
+          /opt/kafka/bin/kafka-topics.sh \
+            --bootstrap-server kafka:19092 \
+            --describe --topic "$${topic}"
+        done
+    labels:
+      lab.service: kafka-init
+
+  kafka-ui:
+    image: docker.redpanda.com/redpandadata/console:v3.10.0
+    hostname: kafka-ui
+    ports:
+      - "127.0.0.1:18080:8080"
+    environment:
+      KAFKA_BROKERS: kafka:19092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    labels:
+      lab.service: kafka-ui
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    hostname: clickhouse
+    ports:
+      - "127.0.0.1:18123:8123"
+      - "127.0.0.1:19000:9000"
+      - "127.0.0.1:19363:9363"
+    environment:
+      CLICKHOUSE_DB: perfmon
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-flink}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-flink}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - monitoring_clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./clickhouse/prometheus.xml:/etc/clickhouse-server/config.d/prometheus.xml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q Ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    labels:
+      lab.service: clickhouse
+
+  jobmanager:
+    image: telemetry-monitoring-flink:1.20.5-py310
+    platform: linux/amd64
+    build:
+      context: ./flink
+    hostname: jobmanager
+    command: jobmanager
+    ports:
+      - "127.0.0.1:18081:8081"
+      - "127.0.0.1:19249:9249"
+    environment:
+      <<: *flink-environment
+      FLINK_PROPERTIES: *flink-properties
+    volumes:
+      - monitoring_flink_checkpoints:/opt/flink/checkpoints
+      - monitoring_flink_savepoints:/opt/flink/savepoints
+    depends_on:
+      kafka:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl --max-time 3 -fsS http://localhost:8081/overview >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    labels:
+      lab.service: flink-jobmanager
+
+  taskmanager:
+    image: telemetry-monitoring-flink:1.20.5-py310
+    platform: linux/amd64
+    build:
+      context: ./flink
+    hostname: taskmanager
+    command: taskmanager
+    ports:
+      - "127.0.0.1:19250:9249"
+    environment:
+      <<: *flink-environment
+      FLINK_PROPERTIES: *flink-properties
+    volumes:
+      - monitoring_flink_checkpoints:/opt/flink/checkpoints
+      - monitoring_flink_savepoints:/opt/flink/savepoints
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl --max-time 3 -fsS http://localhost:9249/metrics >/dev/null && curl --max-time 3 -fsS http://jobmanager:8081/taskmanagers | grep -q '\"id\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    labels:
+      lab.service: flink-taskmanager
+
+  producer:
+    build:
+      context: ./producer
+    profiles: ["tools"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      KAFKA_TOPIC: telemetry.raw
+      PRODUCER_STATS_INTERVAL_SECONDS: ${PRODUCER_STATS_INTERVAL_SECONDS:-5}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    labels:
+      lab.service: producer
+
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    hostname: prometheus
+    ports:
+      - "127.0.0.1:19090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=3d
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+      - monitoring_prometheus_data:/prometheus
+    depends_on:
+      kafka:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      jobmanager:
+        condition: service_healthy
+      taskmanager:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/ready >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    labels:
+      lab.service: prometheus
+
+  grafana:
+    image: grafana/grafana:13.1.3
+    hostname: grafana
+    ports:
+      - "127.0.0.1:13000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_PLUGINS_PREINSTALL_SYNC: grafana-clickhouse-datasource@4.20.0
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - monitoring_grafana_data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+    labels:
+      lab.service: grafana
+
+  loki:
+    image: grafana/loki:3.7.3
+    hostname: loki
+    profiles: ["logs"]
+    ports:
+      - "127.0.0.1:13100:3100"
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./observability/loki/loki.yml:/etc/loki/loki.yml:ro
+      - monitoring_loki_data:/loki
+    labels:
+      lab.service: loki
+
+  alloy:
+    image: grafana/alloy:v1.18.1
+    hostname: alloy
+    profiles: ["logs"]
+    ports:
+      - "127.0.0.1:22345:12345"
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - monitoring_alloy_data:/var/lib/alloy/data
+    depends_on:
+      loki:
+        condition: service_started
+    labels:
+      lab.service: alloy
+
+volumes:
+  monitoring_kafka_data:
+  monitoring_clickhouse_data:
+  monitoring_flink_checkpoints:
+  monitoring_flink_savepoints:
+  monitoring_prometheus_data:
+  monitoring_grafana_data:
+  monitoring_loki_data:
+  monitoring_alloy_data:

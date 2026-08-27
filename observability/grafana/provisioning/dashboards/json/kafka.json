@@ -1,0 +1,94 @@
+{
+  "annotations": {"list": []},
+  "description": "Broker traffic, request outcomes, partition storage, and the Flink consumer's progress. Use producer partition summaries beside this dashboard for the hot-key exercise.",
+  "editable": false,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "One active controller is expected in this single-broker KRaft lab.",
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0}, "id": 1,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "kafka_controller_kafkacontroller_active_controller_count or vector(0)", "legendFormat": "controllers", "refId": "A"}],
+      "title": "Active controller", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Should stay zero; replication factor one still exposes broker/partition health transitions.",
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0}, "id": 2,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "kafka_server_replicamanager_under_replicated_partitions or vector(0)", "legendFormat": "partitions", "refId": "A"}],
+      "title": "Under-replicated partitions", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Broker ingress after acknowledgements, grouped by topic when Kafka exposes that dimension.",
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0}, "id": 3,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "sum(rate(kafka_server_brokertopicmetrics_messagesin_total[1m]))", "legendFormat": "records/s", "refId": "A"}],
+      "title": "Messages in", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Flink source pending-record or records-lag-max metrics. Compare with make lag.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0}, "id": 4,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "sum({__name__=~\"flink_.*(pendingRecords|records_lag_max)\"}) or vector(0)", "legendFormat": "pending", "refId": "A"}],
+      "title": "Consumer progress gap", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Byte rates reveal payload cost even when record rates are stable.",
+      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5}, "id": 5,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum(rate(kafka_server_brokertopicmetrics_bytesin_total[1m]))", "legendFormat": "in", "refId": "A"},
+        {"expr": "sum(rate(kafka_server_brokertopicmetrics_bytesout_total[1m]))", "legendFormat": "out", "refId": "B"}
+      ],
+      "title": "Broker network traffic", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Produce and fetch request rates connect producer load to consumer catch-up.",
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5}, "id": 6,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "sum by (request) (rate(kafka_network_requestmetrics_requests_total[1m]))", "legendFormat": "{{request}}", "refId": "A"}],
+      "title": "Requests by API", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Kafka errors remain bounded by request and error category; arbitrary messages are not labels.",
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 13}, "id": 7,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "sum by (request, error) (rate(kafka_network_requestmetrics_errors_total[1m])) or vector(0)", "legendFormat": "{{request}} {{error}}", "refId": "A"}],
+      "title": "Request errors", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Partition log size makes skew persistent and visible even after rates fall to zero.",
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 16, "x": 8, "y": 13}, "id": 8,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "kafka_log_log_size{topic=~\"telemetry\\\\.(raw|dlq)\"}", "legendFormat": "{{topic}} p{{partition}}", "refId": "A"}],
+      "title": "Partition log size / skew", "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": ["learning-lab", "kafka"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "browser",
+  "title": "02 · Kafka broker and consumer progress",
+  "uid": "lab-kafka",
+  "version": 1
+}

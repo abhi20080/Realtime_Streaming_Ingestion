@@ -1,0 +1,68 @@
+logging {
+	level  = "info"
+	format = "json"
+}
+
+discovery.docker "lab" {
+	host             = "unix:///var/run/docker.sock"
+	refresh_interval = "5s"
+
+	filter {
+		name   = "label"
+		values = ["com.docker.compose.project=kafka-flink-clickhouse-lab-monitoring"]
+	}
+}
+
+discovery.relabel "lab" {
+	targets = []
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+		target_label  = "compose_project"
+	}
+
+	rule {
+		target_label = "lab"
+		replacement  = "kafka-flink-clickhouse-monitoring"
+	}
+}
+
+loki.source.docker "lab" {
+	host             = "unix:///var/run/docker.sock"
+	targets          = discovery.docker.lab.targets
+	relabel_rules    = discovery.relabel.lab.rules
+	labels           = {source = "docker"}
+	forward_to       = [loki.process.lab.receiver]
+	refresh_interval = "5s"
+}
+
+loki.process "lab" {
+	stage.json {
+		expressions = {
+			level     = "level",
+			component = "component",
+		}
+	}
+
+	// Only bounded fields become labels. IDs, tenants, payloads, offsets, and
+	// arbitrary error text remain in the log body for query-time parsing.
+	stage.labels {
+		values = {
+			level     = "",
+			component = "",
+		}
+	}
+
+	forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}

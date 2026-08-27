@@ -1,0 +1,14 @@
+apiVersion: 1
+
+providers:
+  - name: Kafka Flink ClickHouse Learning Lab
+    orgId: 1
+    folder: Streaming Lab
+    folderUid: streaming-lab
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 10
+    options:
+      path: /etc/grafana/provisioning/dashboards/json
+      foldersFromFilesStructure: false

@@ -1,0 +1,35 @@
+groups:
+  - name: learning-lab-health
+    interval: 5s
+    rules:
+      - alert: LabScrapeTargetDown
+        expr: up{job=~"kafka|flink-.+|clickhouse"} == 0
+        for: 20s
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }} metrics target is down"
+          description: "Open Prometheus Targets, then correlate with Compose and service logs."
+
+      - alert: KafkaHasUnderReplicatedPartitions
+        expr: kafka_server_replicamanager_under_replicated_partitions > 0
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka has under-replicated partitions"
+
+      - alert: FlinkCheckpointFailuresObserved
+        expr: increase({__name__=~"flink_.*numberOfFailedCheckpoints"}[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A Flink checkpoint failed in the last five minutes"
+
+      - alert: FlinkSourceBacklogGrowing
+        expr: deriv({__name__=~"flink_.*pendingRecords"}[2m]) > 1
+        for: 1m
+        labels:
+          severity: info
+        annotations:
+          summary: "Flink source backlog is growing"

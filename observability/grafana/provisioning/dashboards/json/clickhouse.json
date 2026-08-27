@@ -1,0 +1,97 @@
+{
+  "annotations": {"list": []},
+  "description": "Native server metrics plus read-only SQL over system tables and the persisted stage timeline. Watch this dashboard during the sink-outage exercise.",
+  "editable": false,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Rows acknowledged by ClickHouse inserts per second.",
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0}, "id": 1,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "sum(rate(ClickHouseProfileEvents_InsertedRows[1m])) or vector(0)", "legendFormat": "rows/s", "refId": "A"}],
+      "title": "Inserted rows", "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse"},
+      "description": "Many tiny active parts signal inefficient small insert batches.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0}, "id": 2,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "table", "rawSql": "SELECT count() AS active_parts FROM system.parts WHERE active AND database = 'perfmon' AND table = 'telemetry_events'", "refId": "A"}],
+      "title": "Active parts", "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse"},
+      "description": "Current background merges show part consolidation after catch-up bursts.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0}, "id": 3,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "table", "rawSql": "SELECT count() AS running_merges FROM system.merges WHERE database = 'perfmon' AND table = 'telemetry_events'", "refId": "A"}],
+      "title": "Running merges", "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse"},
+      "description": "Physical rows minus unique event IDs makes at-least-once behavior explicit.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0}, "id": 4,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "table", "rawSql": "SELECT duplicate_rows FROM perfmon.v_data_quality", "refId": "A"}],
+      "title": "Duplicate rows", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Server memory pressure can slow inserts and merges before the JDBC sink visibly fails.",
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5}, "id": 5,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "ClickHouseMetrics_MemoryTracking or vector(0)", "legendFormat": "tracked", "refId": "A"},
+        {"expr": "ClickHouseAsyncMetrics_CGroupMemoryUsed or vector(0)", "legendFormat": "cgroup used", "refId": "B"}
+      ],
+      "title": "Memory", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Insert failures and exception counters should align with JDBC retry logs.",
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5}, "id": 6,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum(rate(ClickHouseProfileEvents_FailedQuery[1m])) or vector(0)", "legendFormat": "failed queries/s", "refId": "A"},
+        {"expr": "sum(rate({__name__=~\"ClickHouseErrorMetric_.+\"}[1m])) or vector(0)", "legendFormat": "{{__name__}}", "refId": "B"}
+      ],
+      "title": "Errors", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse"},
+      "description": "p50/p95/p99 from persisted timestamps; event age is deliberately excluded from end-to-end ingestion latency.",
+      "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13}, "id": 7,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "timeseries", "rawSql": "SELECT minute AS time, end_to_end_p50_ms, end_to_end_p95_ms, end_to_end_p99_ms FROM perfmon.v_latency_quantiles WHERE $__timeFilter(minute) ORDER BY minute", "refId": "A"}],
+      "title": "End-to-end latency quantiles", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse"},
+      "description": "Part rows and compressed bytes connect batch size, throughput, and merge work.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13}, "id": 8,
+      "options": {"footer": {"fields": "", "reducer": ["sum"], "show": false}, "showHeader": true},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "table", "rawSql": "SELECT partition, name, rows, bytes_on_disk, level, modification_time FROM system.parts WHERE active AND database = 'perfmon' AND table = 'telemetry_events' ORDER BY modification_time DESC LIMIT 30", "refId": "A"}],
+      "title": "Recent active parts", "type": "table"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": ["learning-lab", "clickhouse"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "browser",
+  "title": "04 · ClickHouse ingestion and storage",
+  "uid": "lab-clickhouse",
+  "version": 1
+}

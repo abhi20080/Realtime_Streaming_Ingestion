@@ -1,0 +1,15 @@
+.DS_Store
+.env
+.idea/
+.vscode/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.log
+.coverage
+htmlcov/
+dist/
+build/
+target/
+CURRICULUM_*
+LEARNING.md

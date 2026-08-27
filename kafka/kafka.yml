@@ -1,0 +1,102 @@
+# Adapted to Kafka 3.x from the source-backed JMX Exporter Kafka example.
+# Labels are deliberately limited to Kafka's bounded operational dimensions.
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+
+rules:
+  # Friendly names for the first broker-health questions in the lab.
+  - pattern: 'kafka.server<type=ReplicaManager, name=UnderReplicatedPartitions><>Value'
+    name: kafka_server_replicamanager_under_replicated_partitions
+    type: GAUGE
+
+  - pattern: 'kafka.controller<type=KafkaController, name=ActiveControllerCount><>Value'
+    name: kafka_controller_kafkacontroller_active_controller_count
+    type: GAUGE
+
+  # Partition and client-specific gauges.
+  - pattern: 'kafka.server<type=(.+), name=(.+), clientId=(.+), topic=(.+), partition=(.*)><>Value'
+    name: kafka_server_$1_$2
+    type: GAUGE
+    labels:
+      client_id: "$3"
+      topic: "$4"
+      partition: "$5"
+
+  - pattern: 'kafka.coordinator.(\w+)<type=(.+), name=(.+)><>Value'
+    name: kafka_coordinator_$1_$2_$3
+    type: GAUGE
+
+  # Per-second meters become Prometheus counters. rate() supplies the rate.
+  - pattern: 'kafka.(\w+)<type=(.+), name=(.+)PerSec\w*, (.+)=(.+), (.+)=(.+)><>Count'
+    name: kafka_$1_$2_$3_total
+    type: COUNTER
+    labels:
+      "$4": "$5"
+      "$6": "$7"
+
+  - pattern: 'kafka.(\w+)<type=(.+), name=(.+)PerSec\w*, (.+)=(.+)><>Count'
+    name: kafka_$1_$2_$3_total
+    type: COUNTER
+    labels:
+      "$4": "$5"
+
+  - pattern: 'kafka.(\w+)<type=(.+), name=(.+)PerSec\w*><>Count'
+    name: kafka_$1_$2_$3_total
+    type: COUNTER
+
+  # Generic gauges retain at most two stable MBean dimensions.
+  - pattern: 'kafka.(\w+)<type=(.+), name=(.+), (.+)=(.+), (.+)=(.+)><>Value'
+    name: kafka_$1_$2_$3
+    type: GAUGE
+    labels:
+      "$4": "$5"
+      "$6": "$7"
+
+  - pattern: 'kafka.(\w+)<type=(.+), name=(.+), (.+)=(.+)><>Value'
+    name: kafka_$1_$2_$3
+    type: GAUGE
+    labels:
+      "$4": "$5"
+
+  - pattern: 'kafka.(\w+)<type=(.+), name=(.+)><>Value'
+    name: kafka_$1_$2_$3
+    type: GAUGE
+
+  # Counts and request percentiles.
+  - pattern: 'kafka.(\w+)<type=(.+), name=(.+), (.+)=(.+), (.+)=(.+)><>Count'
+    name: kafka_$1_$2_$3_count
+    type: COUNTER
+    labels:
+      "$4": "$5"
+      "$6": "$7"
+
+  - pattern: 'kafka.(\w+)<type=(.+), name=(.+), (.+)=(.+)><>Count'
+    name: kafka_$1_$2_$3_count
+    type: COUNTER
+    labels:
+      "$4": "$5"
+
+  - pattern: 'kafka.(\w+)<type=(.+), name=(.+)><>Count'
+    name: kafka_$1_$2_$3_count
+    type: COUNTER
+
+  - pattern: 'kafka.(\w+)<type=(.+), name=(.+), (.+)=(.*)><>(\d+)thPercentile'
+    name: kafka_$1_$2_$3
+    type: GAUGE
+    labels:
+      "$4": "$5"
+      quantile: "0.$6"
+
+  - pattern: 'kafka.(\w+)<type=(.+), name=(.+)><>(\d+)thPercentile'
+    name: kafka_$1_$2_$3
+    type: GAUGE
+    labels:
+      quantile: "0.$4"
+
+  - pattern: 'kafka.(\w+)<type=(.+), name=(.+)Percent\w*><>MeanRate'
+    name: kafka_$1_$2_$3_percent
+    type: GAUGE
+
+  - pattern: 'kafka.(\w+)<type=(.+), name=(.+)Percent\w*><>Value'
+    name: kafka_$1_$2_$3_percent
+    type: GAUGE

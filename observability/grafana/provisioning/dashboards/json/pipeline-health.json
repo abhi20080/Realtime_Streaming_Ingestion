@@ -1,0 +1,112 @@
+{
+  "annotations": {"list": []},
+  "description": "Follow one record from Kafka acknowledgement through Flink validation and event time into ClickHouse. Start here during every exercise.",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Kafka, both Flink processes, and ClickHouse should all equal one.",
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 4}]}}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "sum(up{job=~\"kafka|flink-.+|clickhouse\"})", "legendFormat": "healthy targets", "refId": "A"}],
+      "title": "Core targets healthy (4/4)",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse"},
+      "description": "Physical rows include deliberate duplicates and any at-least-once replays.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0},
+      "id": 2,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "table", "rawSql": "SELECT total_rows FROM perfmon.v_pipeline_health", "refId": "A"}],
+      "title": "ClickHouse rows",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse"},
+      "description": "Repeated event_id values, including intentional copies and replay copies.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
+      "id": 3,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "table", "rawSql": "SELECT duplicate_rows FROM perfmon.v_pipeline_health", "refId": "A"}],
+      "title": "Duplicate rows",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Malformed values accepted into telemetry.raw and routed by Flink appear here.",
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
+      "id": 4,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "sum(rate(kafka_server_brokertopicmetrics_messagesin_total{topic=\"telemetry.dlq\"}[1m])) or vector(0)", "legendFormat": "DLQ records/s", "refId": "A"}],
+      "title": "DLQ rate",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse"},
+      "description": "Rows reaching ClickHouse each minute, split into physical and unique event IDs.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "id": 5,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "timeseries", "rawSql": "SELECT minute AS time, rows_received, unique_event_ids FROM perfmon.v_throughput_per_minute WHERE $__timeFilter(minute) ORDER BY minute", "refId": "A"}],
+      "title": "Ingest throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse"},
+      "description": "The four persisted clocks separate Kafka/Flink delay from JDBC/ClickHouse delay.",
+      "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "id": 6,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "timeseries", "rawSql": "SELECT minute AS time, kafka_flink_p95_ms, sink_p95_ms, end_to_end_p95_ms FROM perfmon.v_latency_quantiles WHERE $__timeFilter(minute) ORDER BY minute", "refId": "A"}],
+      "title": "Stage latency p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse"},
+      "description": "Injected age and event-time lateness answer different questions; compare them directly.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 13},
+      "id": 7,
+      "options": {"displayMode": "gradient", "minVizHeight": 10, "minVizWidth": 0, "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showUnfilled": true, "sizing": "auto"},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "table", "rawSql": "SELECT injected_late_rows AS injected, observed_late_rows AS observed, unexpected_observed_late_rows AS unexpected FROM perfmon.v_data_quality", "refId": "A"}],
+      "title": "Intentional vs observed lateness",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Bounded custom counters from the parse/validate and watermark operators.",
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 13},
+      "id": 8,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum(rate({__name__=~\"flink_.*lab_records_valid\"}[1m]))", "legendFormat": "valid/s", "refId": "A"},
+        {"expr": "sum(rate({__name__=~\"flink_.*lab_records_invalid\"}[1m]))", "legendFormat": "invalid/s", "refId": "B"},
+        {"expr": "sum(rate({__name__=~\"flink_.*lab_records_late\"}[1m]))", "legendFormat": "late/s", "refId": "C"}
+      ],
+      "title": "Flink data-quality rates",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": ["learning-lab", "pipeline"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "browser",
+  "title": "01 · End-to-end pipeline health",
+  "uid": "lab-pipeline-health",
+  "version": 1
+}
