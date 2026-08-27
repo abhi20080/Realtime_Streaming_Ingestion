@@ -24,25 +24,6 @@ This is a standalone sibling of the simpler baseline lab. It uses different
 host ports, its own Compose project, and independent volumes, so both projects
 can run at the same time.
 
-## What you will learn
-
-- How Kafka keys determine partitions and create hot partitions.
-- The difference between producer acknowledgement, consumer offset, committed
-  offset, and consumer lag.
-- How Flink event time, watermarks, idle inputs, checkpoints, restarts, and
-  backpressure behave.
-- Why a JDBC sink is at-least-once even when Flink checkpoints are exactly-once.
-- How ClickHouse parts, merges, ordering keys, and query logs expose ingestion
-  behavior.
-- When to use logs, metrics, a DLQ, or data-level audit columns.
-
-The guided exercises are in [LEARNING.md](LEARNING.md). The rationale behind
-the signal and cardinality choices is in [ARCHITECTURE.md](ARCHITECTURE.md),
-and the staged verification workflow is in [TESTING.md](TESTING.md).
-
-If you are continuing the structured course that began with the baseline lab,
-use [CURRICULUM_HANDOFF.md](CURRICULUM_HANDOFF.md) to resume at the recorded
-session with this repository's commands, source map, and citation contract.
 
 ## Requirements
 
