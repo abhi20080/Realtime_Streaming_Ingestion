@@ -11,7 +11,6 @@ from producer.producer import (
     EVENT_FIELDS,
     LATE_MIN_SECONDS,
     EventFactory,
-    KafkaStatisticsObserver,
     PeriodicSummary,
     ProducerStats,
     WorkloadGenerator,
@@ -170,7 +169,7 @@ def test_librdkafka_statistics_callback_aggregates_broker_retries() -> None:
     stats = ProducerStats()
 
     assert extract_tx_retries(payload) == 7
-    assert KafkaStatisticsObserver(stats)(payload) == 0
+    assert stats.record_kafka_statistics(payload) == 0
     assert snapshot_log_fields(stats.snapshot())["tx_retries"] == 7
 
 

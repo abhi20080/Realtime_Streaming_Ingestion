@@ -3,6 +3,9 @@
 
 Kafka is imported only by :func:`run`; event generation and accounting remain
 fast, deterministic, and unit-testable without a broker or native client.
+
+Read from :func:`main` at the bottom: ``run`` wires together the Kafka-free
+workload generator, delivery accounting, and the Kafka client.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, TextIO
 
 
+# Event contract and runtime defaults.
 SCHEMA_VERSION = 1
 DEFAULT_BOOTSTRAP_SERVERS = "kafka:19092"
 DEFAULT_TOPIC = "telemetry.raw"
@@ -49,6 +53,7 @@ FIRMWARES = ("1.8.4", "1.9.0", "2.0.1")
 _LOG_LOCK = threading.Lock()
 
 
+# Shared parsing and structured logging helpers.
 def utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -112,6 +117,7 @@ def emit_json_log(
         destination.flush()
 
 
+# Kafka-free event and anomaly generation.
 class EventFactory:
     """Create original events and faithful, visibly refreshed duplicates."""
 
@@ -267,6 +273,7 @@ class WorkloadGenerator:
         return batch
 
 
+# Delivery accounting shared with Kafka callbacks.
 @dataclass(frozen=True)
 class StatsSnapshot:
     attempted: int
@@ -294,11 +301,15 @@ class ProducerStats:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._attempted = self._attempted_bytes = 0
-        self._acked = self._failed = self._undelivered = 0
+        self._attempted = 0
+        self._attempted_bytes = 0
+        self._acked = 0
+        self._failed = 0
+        self._undelivered = 0
         self._partition_counts: Counter[int] = Counter()
         self._offset_ranges: dict[int, tuple[int, int]] = {}
-        self._ack_latency_total_ms = self._ack_latency_max_ms = 0.0
+        self._ack_latency_total_ms = 0.0
+        self._ack_latency_max_ms = 0.0
         self._tx_retries = 0
 
     def record_attempt(self, payload_bytes: int) -> None:
@@ -333,12 +344,33 @@ class ProducerStats:
         with self._lock:
             self._tx_retries = max(self._tx_retries, count)
 
+    def record_kafka_statistics(self, statistics_json: str) -> int:
+        """Update retry counters when librdkafka invokes ``stats_cb``."""
+
+        try:
+            self.observe_tx_retries(extract_tx_retries(statistics_json))
+        except (TypeError, ValueError) as exc:
+            emit_json_log(
+                "kafka_statistics_parse_failure",
+                level="WARN",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+        return 0
+
     def snapshot(self) -> StatsSnapshot:
         with self._lock:
             return StatsSnapshot(
-                self._attempted, self._attempted_bytes, self._acked, self._failed,
-                self._undelivered, dict(self._partition_counts), dict(self._offset_ranges),
-                self._ack_latency_total_ms, self._ack_latency_max_ms, self._tx_retries,
+                attempted=self._attempted,
+                attempted_bytes=self._attempted_bytes,
+                acked=self._acked,
+                failed=self._failed,
+                undelivered=self._undelivered,
+                partition_counts=dict(self._partition_counts),
+                offset_ranges=dict(self._offset_ranges),
+                ack_latency_total_ms=self._ack_latency_total_ms,
+                ack_latency_max_ms=self._ack_latency_max_ms,
+                tx_retries=self._tx_retries,
             )
 
 
@@ -366,23 +398,29 @@ class PeriodicSummary:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
         self.interval_seconds = interval_seconds
-        self.started_at = self.last_at = started_at
-        self.last_attempted = self.last_acked = self.last_failed = 0
+        self.started_at = started_at
+        self.last_at = started_at
+        self.last_attempted = 0
+        self.last_acked = 0
+        self.last_failed = 0
 
     def due(self, now: float) -> bool:
         return now - self.last_at >= self.interval_seconds
 
     def build(self, snapshot: StatsSnapshot, *, now: float, queue_depth: int) -> dict[str, Any]:
         interval = max(now - self.last_at, 1e-9)
+        attempted = snapshot.attempted - self.last_attempted
+        acked = snapshot.acked - self.last_acked
+        failed = snapshot.failed - self.last_failed
         fields = snapshot_log_fields(snapshot)
         fields.update(
             elapsed_seconds=round(max(now - self.started_at, 0.0), 3),
             interval_seconds=round(interval, 3),
-            interval_attempted=snapshot.attempted - self.last_attempted,
-            interval_acked=snapshot.acked - self.last_acked,
-            interval_failed=snapshot.failed - self.last_failed,
-            attempted_per_second=round((snapshot.attempted - self.last_attempted) / interval, 3),
-            acked_per_second=round((snapshot.acked - self.last_acked) / interval, 3),
+            interval_attempted=attempted,
+            interval_acked=acked,
+            interval_failed=failed,
+            attempted_per_second=round(attempted / interval, 3),
+            acked_per_second=round(acked / interval, 3),
             queue_depth=queue_depth,
         )
         self.last_at = now
@@ -392,6 +430,7 @@ class PeriodicSummary:
         return fields
 
 
+# Kafka callback helpers.
 def extract_tx_retries(statistics: str | Mapping[str, Any]) -> int:
     """Aggregate per-broker ``txretries`` from librdkafka statistics JSON."""
 
@@ -406,32 +445,15 @@ def extract_tx_retries(statistics: str | Mapping[str, Any]) -> int:
     brokers = parsed.get("brokers", {})
     if not isinstance(brokers, Mapping):
         return 0
-    return sum(
-        max(0, int(broker.get("txretries", 0)))
-        for broker in brokers.values()
-        if isinstance(broker, Mapping)
-        and isinstance(broker.get("txretries", 0), (int, float))
-        and not isinstance(broker.get("txretries", 0), bool)
-    )
 
-
-class KafkaStatisticsObserver:
-    """Kafka-free callable suitable for confluent-kafka's ``stats_cb``."""
-
-    def __init__(self, stats: ProducerStats) -> None:
-        self.stats = stats
-
-    def __call__(self, statistics_json: str) -> int:
-        try:
-            self.stats.observe_tx_retries(extract_tx_retries(statistics_json))
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            emit_json_log(
-                "kafka_statistics_parse_failure",
-                level="WARN",
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-        return 0
+    total = 0
+    for broker in brokers.values():
+        if not isinstance(broker, Mapping):
+            continue
+        count = broker.get("txretries", 0)
+        if isinstance(count, (int, float)) and not isinstance(count, bool):
+            total += max(0, int(count))
+    return total
 
 
 def _safe_error_value(error: Any, method_name: str) -> Any:
@@ -442,42 +464,13 @@ def _safe_error_value(error: Any, method_name: str) -> Any:
         return None
 
 
-class DeliveryObserver:
-    def __init__(self, stats: ProducerStats) -> None:
-        self.stats = stats
-
-    def callback_for(self, outbound: OutboundMessage, enqueued_at: float) -> Callable[[Any, Any], None]:
-        def callback(error: Any, message: Any) -> None:
-            latency_ms = max(0.0, (time.monotonic() - enqueued_at) * 1_000)
-            common = {
-                "event_id": outbound.event["event_id"],
-                "producer_sequence": outbound.event["producer_sequence"],
-                "malformed": outbound.malformed,
-                "latency_ms": round(latency_ms, 3),
-            }
-            if error is not None:
-                self.stats.record_failure()
-                emit_json_log(
-                    "delivery_failure", level="ERROR", stage="delivery_callback",
-                    kafka_error=str(error), kafka_error_code=_safe_error_value(error, "code"),
-                    kafka_error_name=_safe_error_value(error, "name"),
-                    retriable=_safe_error_value(error, "retriable"),
-                    fatal=_safe_error_value(error, "fatal"), **common,
-                )
-                return
-            partition, offset = int(message.partition()), int(message.offset())
-            self.stats.record_ack(partition, offset, latency_ms)
-            if outbound.trace_delivery:
-                emit_json_log(
-                    "delivery_ack", topic=message.topic(), partition=partition,
-                    offset=offset, **common,
-                )
-        return callback
-
-
+# CLI and producer loop. Start with main() at the bottom of this section.
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Publish observable telemetry to Kafka")
-    parser.add_argument("--bootstrap-servers", default=os.getenv("KAFKA_BOOTSTRAP_SERVERS", DEFAULT_BOOTSTRAP_SERVERS))
+    parser.add_argument(
+        "--bootstrap-servers",
+        default=os.getenv("KAFKA_BOOTSTRAP_SERVERS", DEFAULT_BOOTSTRAP_SERVERS),
+    )
     parser.add_argument("--topic", default=os.getenv("KAFKA_TOPIC", DEFAULT_TOPIC))
     parser.add_argument("--rate", type=positive_float, default=10.0, help="original events/second")
     parser.add_argument("--count", type=nonnegative_int, default=0,
@@ -510,14 +503,58 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def _enqueue(
-    producer: Any, topic: str, outbound: OutboundMessage, stats: ProducerStats,
-    observer: DeliveryObserver, stop_event: threading.Event,
+    producer: Any,
+    topic: str,
+    outbound: OutboundMessage,
+    stats: ProducerStats,
+    stop_event: threading.Event,
 ) -> None:
     stats.record_attempt(len(outbound.value))
-    callback = observer.callback_for(outbound, time.monotonic())
+    enqueued_at = time.monotonic()
+
+    def delivery_callback(error: Any, message: Any) -> None:
+        latency_ms = max(0.0, (time.monotonic() - enqueued_at) * 1_000)
+        common = {
+            "event_id": outbound.event["event_id"],
+            "producer_sequence": outbound.event["producer_sequence"],
+            "malformed": outbound.malformed,
+            "latency_ms": round(latency_ms, 3),
+        }
+        if error is not None:
+            stats.record_failure()
+            emit_json_log(
+                "delivery_failure",
+                level="ERROR",
+                stage="delivery_callback",
+                kafka_error=str(error),
+                kafka_error_code=_safe_error_value(error, "code"),
+                kafka_error_name=_safe_error_value(error, "name"),
+                retriable=_safe_error_value(error, "retriable"),
+                fatal=_safe_error_value(error, "fatal"),
+                **common,
+            )
+            return
+
+        partition = int(message.partition())
+        offset = int(message.offset())
+        stats.record_ack(partition, offset, latency_ms)
+        if outbound.trace_delivery:
+            emit_json_log(
+                "delivery_ack",
+                topic=message.topic(),
+                partition=partition,
+                offset=offset,
+                **common,
+            )
+
     while not stop_event.is_set():
         try:
-            producer.produce(topic=topic, key=outbound.key, value=outbound.value, on_delivery=callback)
+            producer.produce(
+                topic=topic,
+                key=outbound.key,
+                value=outbound.value,
+                on_delivery=delivery_callback,
+            )
             return
         except BufferError:
             producer.poll(0.1)
@@ -538,31 +575,28 @@ def _enqueue(
     )
 
 
-def _poll_until(producer: Any, stop_event: threading.Event, due_at: float) -> None:
-    while not stop_event.is_set():
-        remaining = due_at - time.monotonic()
-        if remaining <= 0:
-            return
-        producer.poll(min(remaining, 0.1))
-
-
 def run(args: argparse.Namespace) -> int:
     try:
         from confluent_kafka import Producer
     except ImportError:
-        emit_json_log("producer_startup_failure", level="ERROR", error="confluent-kafka is not installed")
+        emit_json_log(
+            "producer_startup_failure",
+            level="ERROR",
+            error="confluent-kafka is not installed",
+        )
         return 2
 
     run_id = args.run_id or str(uuid.uuid4())
     seed = args.seed if args.seed is not None else random.SystemRandom().randrange(2**63)
     factory = EventFactory(run_id=run_id, rng=random.Random(seed))
+    # Keep event values and anomaly decisions deterministic but independent.
     workload = WorkloadGenerator(
         factory, duplicate_rate=args.duplicate_rate, late_rate=args.late_rate,
         hot_tenant_rate=args.hot_tenant_rate, bad_json_rate=args.bad_json_rate,
         trace_sample_rate=args.trace_sample_rate, rng=random.Random(seed ^ 0x5DEECE66D),
     )
-    stats, stop_event = ProducerStats(), threading.Event()
-    kafka_statistics_observer = KafkaStatisticsObserver(stats)
+    stats = ProducerStats()
+    stop_event = threading.Event()
     kafka_config = {
         "bootstrap.servers": args.bootstrap_servers,
         # Keep the Kafka client dimension bounded across repeated lab runs.
@@ -575,40 +609,49 @@ def run(args: argparse.Namespace) -> int:
         "request.timeout.ms": 30_000,
         "linger.ms": 5,
         "statistics.interval.ms": max(1_000, int(args.stats_interval_seconds * 1_000)),
-        "stats_cb": kafka_statistics_observer,
+        "stats_cb": stats.record_kafka_statistics,
     }
     producer = Producer(kafka_config)
-    observer = DeliveryObserver(stats)
-    received_signal: list[str] = []
+    received_signal: str | None = None
 
     def request_stop(signum: int, _frame: Any) -> None:
-        received_signal[:] = [signal.Signals(signum).name]
+        nonlocal received_signal
+        received_signal = signal.Signals(signum).name
         stop_event.set()
 
     previous_handlers = {
-        signum: signal.signal(signum, request_stop) for signum in (signal.SIGINT, signal.SIGTERM)
+        signum: signal.signal(signum, request_stop)
+        for signum in (signal.SIGINT, signal.SIGTERM)
     }
     started_at = time.monotonic()
     reporter = PeriodicSummary(args.stats_interval_seconds, started_at=started_at)
     emit_json_log(
         "producer_startup", producer_run_id=run_id, seed=seed,
-        bootstrap_servers=args.bootstrap_servers, topic=args.topic, rate=args.rate, count=args.count,
+        bootstrap_servers=args.bootstrap_servers, topic=args.topic,
+        rate=args.rate, count=args.count,
         count_semantics="original_events; duplicates_are_additional_records",
         duplicate_rate=args.duplicate_rate, late_rate=args.late_rate,
         hot_tenant_rate=args.hot_tenant_rate, bad_json_rate=args.bad_json_rate,
-        trace_sample_rate=args.trace_sample_rate, stats_interval_seconds=args.stats_interval_seconds,
-        kafka_client_id=kafka_config["client.id"], kafka_acks="all", kafka_idempotence=True,
+        trace_sample_rate=args.trace_sample_rate,
+        stats_interval_seconds=args.stats_interval_seconds,
+        kafka_client_id=kafka_config["client.id"], kafka_acks="all",
+        kafka_idempotence=True,
     )
 
-    originals_generated, shutdown_reason = 0, "count_completed"
+    originals_generated = 0
+    shutdown_reason = "count_completed"
     next_original_at = started_at
     try:
         while not stop_event.is_set() and (args.count == 0 or originals_generated < args.count):
-            _poll_until(producer, stop_event, next_original_at)
+            while not stop_event.is_set():
+                remaining = next_original_at - time.monotonic()
+                if remaining <= 0:
+                    break
+                producer.poll(min(remaining, 0.1))
             if stop_event.is_set():
                 break
             for outbound in workload.next_batch():
-                _enqueue(producer, args.topic, outbound, stats, observer, stop_event)
+                _enqueue(producer, args.topic, outbound, stats, stop_event)
             originals_generated += 1
             producer.poll(0)
             now = time.monotonic()
@@ -620,10 +663,19 @@ def run(args: argparse.Namespace) -> int:
                 )
             next_original_at += 1.0 / args.rate
         if stop_event.is_set():
-            shutdown_reason = f"signal_{received_signal[0]}" if received_signal else "stop_requested"
+            shutdown_reason = (
+                f"signal_{received_signal}"
+                if received_signal
+                else "stop_requested"
+            )
     except Exception as exc:
         shutdown_reason = "unhandled_exception"
-        emit_json_log("producer_runtime_failure", level="ERROR", error_type=type(exc).__name__, error=str(exc))
+        emit_json_log(
+            "producer_runtime_failure",
+            level="ERROR",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
     finally:
         emit_json_log(
             "producer_flush_started", producer_run_id=run_id, queue_depth=len(producer),
@@ -643,7 +695,12 @@ def run(args: argparse.Namespace) -> int:
         for signum, previous in previous_handlers.items():
             signal.signal(signum, previous)
 
-    return 0 if shutdown_reason != "unhandled_exception" and final_snapshot.failed == 0 and final_snapshot.undelivered == 0 else 1
+    succeeded = (
+        shutdown_reason != "unhandled_exception"
+        and final_snapshot.failed == 0
+        and final_snapshot.undelivered == 0
+    )
+    return 0 if succeeded else 1
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -47,8 +47,14 @@ These tests intentionally interrupt services. Keep Grafana, the Flink UI,
 
 ### TaskManager recovery
 
-1. Start an unbounded producer using the command in Exercise 5 of
-   [LEARNING.md](LEARNING.md).
+1. Start an unbounded producer in a separate terminal:
+
+   ```bash
+   docker compose --profile tools run --rm producer \
+     --rate 1000 --count 0 \
+     --duplicate-rate 0 --late-rate 0 --bad-json-rate 0
+   ```
+
 2. Wait for at least two successful checkpoints.
 3. Run `docker compose kill taskmanager`, then
    `docker compose up -d taskmanager`.

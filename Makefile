@@ -3,11 +3,15 @@ COMPOSE := docker compose
 UV := uv
 PYTHON_DEV := $(UV) run --no-project --with pytest==8.4.2 --with PyYAML==6.0.2
 CLICKHOUSE_CLIENT := $(COMPOSE) exec -T clickhouse sh -ec 'exec clickhouse-client --user "$$CLICKHOUSE_USER" --password "$$CLICKHOUSE_PASSWORD" "$$@"' sh
+KEYBY_LAB := python3 scripts/keyby_lab.py
 
 .PHONY: build up up-observability up-logs init submit produce-small produce-observable \
 	status observe lag dlq latency checkpoints logs validate test smoke stop reset \
-	deploy teardown stop-logs help
+	deploy teardown stop-logs keyby-savepoint keyby-rebuild keyby-submit \
+	keyby-on keyby-off flink-reset produce-keyby observe-keyby verify-keyby \
+	keyby-logs help
 
+# Core lab lifecycle and regular workloads.
 build: ## Build Kafka/JMX, PyFlink, and producer images.
 	$(COMPOSE) --profile tools build
 
@@ -44,6 +48,45 @@ produce-observable: ## Generate a large dashboard-friendly anomaly workload.
 		--bad-json-rate 0.005 \
 		--trace-sample-rate 0.001
 
+# Optional keyBy experiment. The control script owns safe savepoint transitions.
+keyby-on: ## Safely switch the sole running baseline job to the keyBy pipeline.
+	@$(KEYBY_LAB) keyby-on
+
+keyby-off: ## Safely switch the sole running keyBy job to the normal pipeline.
+	@$(KEYBY_LAB) keyby-off
+
+flink-reset: ## Safely restart the current Flink job mode from a drained savepoint.
+	@$(KEYBY_LAB) flink-reset
+
+keyby-savepoint: ## Drain the one running lab job into a canonical savepoint.
+	@$(KEYBY_LAB) savepoint
+
+keyby-rebuild: ## Safely rebuild/recreate only idle Flink services; retain volumes.
+	@$(KEYBY_LAB) rebuild
+
+keyby-submit: ## Restore the keyBy-enabled job; usage: make keyby-submit SAVEPOINT=file:/...
+	@test -n "$(strip $(SAVEPOINT))" || (echo "Usage: make keyby-submit SAVEPOINT=file:/opt/flink/savepoints/savepoint-..."; exit 2)
+	@$(KEYBY_LAB) submit --savepoint "$(SAVEPOINT)"
+
+produce-keyby: ## Generate 20k valid events with a 95% tenant-hot workload.
+	$(COMPOSE) --profile tools run --rm producer \
+		--rate 500 --count 20000 \
+		--duplicate-rate 0 \
+		--late-rate 0 \
+		--hot-tenant-rate 0.95 \
+		--bad-json-rate 0 \
+		--trace-sample-rate 0
+
+observe-keyby: ## Print the live keyBy graph, per-subtask metrics, and shuffle rates.
+	@$(KEYBY_LAB) observe
+
+verify-keyby: ## Opt in to the read-only live Chapter 8 acceptance check.
+	@$(KEYBY_LAB) verify
+
+keyby-logs: ## Print a bounded tail of keyed-state milestones.
+	@$(KEYBY_LAB) logs
+
+# Inspection and operational queries.
 status: ## Show this Compose project's service status.
 	$(COMPOSE) ps
 
@@ -89,6 +132,7 @@ logs: ## Follow logs; usage: make logs SERVICE=taskmanager.
 	@test -n "$(SERVICE)" || (echo "Usage: make logs SERVICE=jobmanager"; exit 2)
 	$(COMPOSE) logs --tail=200 -f $(SERVICE)
 
+# Static checks, live verification, and shutdown.
 validate: ## Validate Compose, YAML, provisioning, and dashboards.
 	$(COMPOSE) config --quiet
 	$(UV) run --no-project --with PyYAML==6.0.2 python scripts/validate_configs.py

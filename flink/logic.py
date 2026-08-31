@@ -1,4 +1,8 @@
-"""Pure validation, DLQ, and event-time helpers (no PyFlink dependency)."""
+"""Pure validation, DLQ, and event-time helpers (no PyFlink dependency).
+
+``validate_event`` is the main entry point; the remaining public helpers serve
+the Flink operators in ``job.py``.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
 
 
+# Validation contract shared by the main stream and DLQ.
 PIPELINE_VERSION = "1.0.0"
 LONG_MIN = -(1 << 63)
 LONG_MAX = (1 << 63) - 1
@@ -30,6 +35,26 @@ REQUIRED_FIELDS = (
 )
 
 
+# Small job-policy helpers kept here so they can run without PyFlink.
+def parse_strict_true_false(value: str, *, setting_name: str) -> bool:
+    """Parse an opt-in setting without silently accepting ambiguous values."""
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise ValueError(f"{setting_name} must be exactly 'true' or 'false'")
+
+
+def is_decimal_milestone(value: int) -> bool:
+    """Return whether value is one of 1, 10, 100, 1000, and so on."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return False
+    while value > 1 and value % 10 == 0:
+        value //= 10
+    return value == 1
+
+
+# Validation result types.
 @dataclass(frozen=True)
 class ValidatedEvent:
     schema_version: int
@@ -74,6 +99,7 @@ class _ValidationIssue(Exception):
         self.detail = bounded_error_detail(detail)
 
 
+# Payload validation.
 def bounded_error_detail(detail: object) -> str:
     single_line = " ".join(str(detail).splitlines()).strip()
     if len(single_line) <= MAX_ERROR_DETAIL_LENGTH:
@@ -81,14 +107,14 @@ def bounded_error_detail(detail: object) -> str:
     return single_line[: MAX_ERROR_DETAIL_LENGTH - 3] + "..."
 
 
-def _nonempty_string(payload: Mapping[str, Any], field: str) -> str:
+def _read_nonempty_string(payload: Mapping[str, Any], field: str) -> str:
     value = payload[field]
     if not isinstance(value, str) or not value.strip():
         raise _ValidationIssue(INVALID_TYPE, f"{field} must be a non-empty string")
     return value
 
 
-def _timestamp(payload: Mapping[str, Any], field: str) -> datetime:
+def _parse_timestamp(payload: Mapping[str, Any], field: str) -> datetime:
     value = payload[field]
     if not isinstance(value, str):
         raise _ValidationIssue(INVALID_TIMESTAMP, f"{field} must be an ISO-8601 string")
@@ -142,15 +168,21 @@ def validate_event(raw_payload: str) -> ValidationResult:
 
     try:
         schema_version = payload["schema_version"]
-        if (isinstance(schema_version, bool) or not isinstance(schema_version, int)
-                or not 1 <= schema_version <= UINT16_MAX):
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or not 1 <= schema_version <= UINT16_MAX
+        ):
             raise _ValidationIssue(
                 INVALID_TYPE,
                 f"schema_version must be an integer from 1 through {UINT16_MAX}",
             )
         sequence = payload["producer_sequence"]
-        if (isinstance(sequence, bool) or not isinstance(sequence, int)
-                or not 0 <= sequence <= LONG_MAX):
+        if (
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or not 0 <= sequence <= LONG_MAX
+        ):
             raise _ValidationIssue(
                 INVALID_TYPE,
                 f"producer_sequence must be an integer from 0 through {LONG_MAX}",
@@ -167,17 +199,17 @@ def validate_event(raw_payload: str) -> ValidationResult:
 
         event = ValidatedEvent(
             schema_version=schema_version,
-            producer_run_id=_nonempty_string(payload, "producer_run_id"),
+            producer_run_id=_read_nonempty_string(payload, "producer_run_id"),
             producer_sequence=sequence,
-            produced_at=_timestamp(payload, "produced_at"),
-            event_id=_nonempty_string(payload, "event_id"),
-            tenant_id=_nonempty_string(payload, "tenant_id"),
-            device_id=_nonempty_string(payload, "device_id"),
-            metric_name=_nonempty_string(payload, "metric_name"),
+            produced_at=_parse_timestamp(payload, "produced_at"),
+            event_id=_read_nonempty_string(payload, "event_id"),
+            tenant_id=_read_nonempty_string(payload, "tenant_id"),
+            device_id=_read_nonempty_string(payload, "device_id"),
+            metric_name=_read_nonempty_string(payload, "metric_name"),
             metric_value=metric_value,
-            event_time=_timestamp(payload, "event_time"),
-            region=_nonempty_string(payload, "region"),
-            firmware=_nonempty_string(payload, "firmware"),
+            event_time=_parse_timestamp(payload, "event_time"),
+            region=_read_nonempty_string(payload, "region"),
+            firmware=_read_nonempty_string(payload, "firmware"),
             injected_duplicate=payload["injected_duplicate"],
             injected_late=payload["injected_late"],
         )
@@ -186,6 +218,7 @@ def validate_event(raw_payload: str) -> ValidationResult:
     return ValidationResult(event=event)
 
 
+# Event-time and DLQ output helpers.
 def event_time_ms_for_watermark(raw_payload: str) -> int:
     """Extract valid event time without letting a rejected record advance time.
 

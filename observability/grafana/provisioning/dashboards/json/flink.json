@@ -1,6 +1,6 @@
 {
   "annotations": {"list": []},
-  "description": "Operator flow, event-time watermarks, backpressure, checkpoints, and recovery. Keep the Flink job graph open beside this dashboard.",
+  "description": "Operator flow, optional keyBy redistribution and state, event-time watermarks, backpressure, checkpoints, and recovery. Keep the Flink job graph open beside this dashboard.",
   "editable": false,
   "graphTooltip": 1,
   "id": null,
@@ -129,6 +129,42 @@
       "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [{"expr": "sum(rate(flink_taskmanager_job_task_operator_lab_records_late[1m]))", "legendFormat": "observed late/s", "refId": "A"}],
       "title": "Observed late records", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Compare valid records on source/validation subtasks before the HASH exchange with records received by count-records-by-tenant after keyBy. Different subtask indexes on the two sides are independent ownership domains. Post-keyBy series are absent while the feature gate is disabled.",
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 37}, "id": 13,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (subtask_index) (rate(flink_taskmanager_job_task_operator_lab_records_valid{operator_name=\"parse_and_validate_telemetry\"}[1m]))", "legendFormat": "before keyBy s{{subtask_index}}", "refId": "A"},
+        {"expr": "sum by (subtask_index) (rate(flink_taskmanager_job_task_operator_lab_keyed_records{operator_name=~\"count_records_by_tenant.*\"}[1m]))", "legendFormat": "after keyBy s{{subtask_index}}", "refId": "B"}
+      ],
+      "title": "Before / after keyBy by subtask", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "The keyed-record rate shows downstream load. The tenant-hot ValueState gauge is positive only on the one subtask that owns that key; it is not a count of all keys or all state entries. This panel is empty while the feature gate is disabled.",
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": [{"matcher": {"id": "byFrameRefID", "options": "B"}, "properties": [{"id": "unit", "value": "short"}]}]},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 37}, "id": 14,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (subtask_index) (rate(flink_taskmanager_job_task_operator_lab_keyed_records{operator_name=~\"count_records_by_tenant.*\"}[1m]))", "legendFormat": "keyed/s s{{subtask_index}}", "refId": "A"},
+        {"expr": "max by (subtask_index) (flink_taskmanager_job_task_operator_lab_hot_tenant_state_count{operator_name=~\"count_records_by_tenant.*\"})", "legendFormat": "tenant-hot state s{{subtask_index}}", "refId": "B"}
+      ],
+      "title": "Keyed load and tenant-hot state", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Bytes entering the keyed downstream task across Flink's HASH exchange. This lab has one TaskManager with four slots, so the shuffle is local and remote should remain zero; remote traffic requires subtasks on another TaskManager. This panel is empty while the feature gate is disabled.",
+      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 45}, "id": 15,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (subtask_index) (flink_taskmanager_job_task_numBytesInLocalPerSecond{task_name=~\"count_records_by_tenant.*\"})", "legendFormat": "local s{{subtask_index}}", "refId": "A"},
+        {"expr": "sum by (subtask_index) (flink_taskmanager_job_task_numBytesInRemotePerSecond{task_name=~\"count_records_by_tenant.*\"})", "legendFormat": "remote s{{subtask_index}}", "refId": "B"}
+      ],
+      "title": "keyBy shuffle input: local / remote", "type": "timeseries"
     }
   ],
   "refresh": "5s",

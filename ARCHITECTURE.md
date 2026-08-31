@@ -9,7 +9,10 @@ producer
 telemetry.raw (6 Kafka partitions)
   │
   ▼
-Flink KafkaSource ─▶ validate ─┬─▶ event-time + watermark inspection ─▶ JDBC ─▶ ClickHouse
+Flink KafkaSource ─▶ validate ─┬─▶ optional keyBy + tenant state
+                              │              │
+                              │              ▼
+                              │    event-time + watermark inspection ─▶ JDBC ─▶ ClickHouse
                               │
                               └─▶ telemetry.dlq
 ```
@@ -29,7 +32,14 @@ ClickHouse ────┘
 ClickHouse tables/views ─────────▶ Grafana ClickHouse datasource
 
 Docker JSON logs ─▶ Alloy ─▶ Loki ─▶ Grafana (optional profile)
+
+scripts/keyby_lab.py ─▶ Flink REST + Prometheus (read-only evidence)
+                     └─▶ savepoint + Compose restart (explicit mode changes)
 ```
+
+The optional `keyBy` branch is disabled by default. It adds one keyed-state
+operator between validation and lateness observation; the control script is
+outside the record-processing path.
 
 The dashboards intentionally combine system metrics with data-level SQL:
 metrics explain runtime pressure, while persisted timestamps and flags explain

@@ -1,4 +1,8 @@
-"""Observable Kafka -> PyFlink -> ClickHouse telemetry job."""
+"""Assemble the observable Kafka -> PyFlink -> ClickHouse job.
+
+Start with :func:`main` near the bottom to see the graph in execution order.
+The per-record Python logic that does not require PyFlink lives in ``logic.py``.
+"""
 
 from __future__ import annotations
 
@@ -20,10 +24,12 @@ from pyflink.common.watermark_strategy import TimestampAssigner
 from pyflink.datastream import (
     CheckpointingMode,
     ExternalizedCheckpointCleanup,
+    KeyedProcessFunction,
     ProcessFunction,
     StreamExecutionEnvironment,
 )
 from pyflink.datastream.output_tag import OutputTag
+from pyflink.datastream.state import ValueStateDescriptor
 from pyflink.datastream.connectors.jdbc import (
     JdbcConnectionOptions,
     JdbcExecutionOptions,
@@ -45,11 +51,14 @@ from logic import (
     build_dlq_record,
     calculate_lateness,
     event_time_ms_for_watermark,
+    is_decimal_milestone,
     normalize_watermark_ms,
+    parse_strict_true_false,
     validate_event,
 )
 
 
+# Runtime configuration and row schemas.
 JOB_NAME = "kafka-flink-clickhouse-monitoring"
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:19092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "telemetry.raw")
@@ -69,38 +78,51 @@ CHECKPOINT_INTERVAL_MS = int(os.getenv("CHECKPOINT_INTERVAL_MS", "10000"))
 PARSE_ERROR_LOG_SAMPLE_RATE = float(
     os.getenv("PARSE_ERROR_LOG_SAMPLE_RATE", "0.05")
 )
+ENABLE_KEYBY_LAB = parse_strict_true_false(
+    os.getenv("ENABLE_KEYBY_LAB", "false"), setting_name="ENABLE_KEYBY_LAB"
+)
 
 
-PARSED_FIELDS = [
-    "schema_version", "producer_run_id", "producer_sequence", "produced_at",
-    "event_id", "tenant_id", "device_id", "metric_name", "metric_value",
-    "event_time", "region", "firmware", "injected_duplicate", "injected_late",
-    "event_time_ms",
+PARSED_SCHEMA = [
+    ("schema_version", Types.INT()),
+    ("producer_run_id", Types.STRING()),
+    ("producer_sequence", Types.LONG()),
+    ("produced_at", Types.SQL_TIMESTAMP()),
+    ("event_id", Types.STRING()),
+    ("tenant_id", Types.STRING()),
+    ("device_id", Types.STRING()),
+    ("metric_name", Types.STRING()),
+    ("metric_value", Types.DOUBLE()),
+    ("event_time", Types.SQL_TIMESTAMP()),
+    ("region", Types.STRING()),
+    ("firmware", Types.STRING()),
+    ("injected_duplicate", Types.BOOLEAN()),
+    ("injected_late", Types.BOOLEAN()),
+    ("event_time_ms", Types.LONG()),
 ]
-PARSED_TYPES = [
-    Types.INT(), Types.STRING(), Types.LONG(), Types.SQL_TIMESTAMP(),
-    Types.STRING(), Types.STRING(), Types.STRING(), Types.STRING(), Types.DOUBLE(),
-    Types.SQL_TIMESTAMP(), Types.STRING(), Types.STRING(), Types.BOOLEAN(),
-    Types.BOOLEAN(), Types.LONG(),
-]
-PARSED_TYPE = Types.ROW_NAMED(PARSED_FIELDS, PARSED_TYPES)
+PARSED_FIELDS = [name for name, _field_type in PARSED_SCHEMA]
+PARSED_TYPE = Types.ROW_NAMED(
+    PARSED_FIELDS,
+    [field_type for _name, field_type in PARSED_SCHEMA],
+)
+TENANT_ID_INDEX = PARSED_FIELDS.index("tenant_id")
+EVENT_TIME_MS_INDEX = PARSED_FIELDS.index("event_time_ms")
+HOT_TENANT_ID = "tenant-hot"
 
-SINK_FIELDS = PARSED_FIELDS[:-1] + [
-    "flink_processed_at",
-    "watermark_at_arrival",
-    "is_late_at_flink",
-    "lateness_ms",
+SINK_SCHEMA = PARSED_SCHEMA[:-1] + [
+    ("flink_processed_at", Types.SQL_TIMESTAMP()),
+    ("watermark_at_arrival", Types.SQL_TIMESTAMP()),
+    ("is_late_at_flink", Types.BOOLEAN()),
+    ("lateness_ms", Types.LONG()),
 ]
-SINK_TYPES = PARSED_TYPES[:-1] + [
-    Types.SQL_TIMESTAMP(),
-    Types.SQL_TIMESTAMP(),
-    Types.BOOLEAN(),
-    Types.LONG(),
-]
-SINK_TYPE = Types.ROW_NAMED(SINK_FIELDS, SINK_TYPES)
+SINK_TYPE = Types.ROW_NAMED(
+    [name for name, _field_type in SINK_SCHEMA],
+    [field_type for _name, field_type in SINK_SCHEMA],
+)
 INVALID_OUTPUT = OutputTag("invalid-telemetry", Types.STRING())
 
 
+# Structured operator logging.
 def configure_logging() -> logging.Logger:
     logger = logging.getLogger("telemetry-pipeline")
     logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
@@ -134,10 +156,13 @@ def log_json(level: int, message: str, **fields) -> None:
     )
 
 
-def naive_utc(value: datetime) -> datetime:
+def to_flink_sql_timestamp(value: datetime) -> datetime:
+    """Convert an aware datetime to Flink's timezone-free SQL timestamp."""
+
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+# Per-record Flink operators.
 class ParseValidateFunction(ProcessFunction):
     """Validate records, emit valid typed rows, and side-output DLQ JSON."""
 
@@ -184,13 +209,13 @@ class ParseValidateFunction(ProcessFunction):
             event.schema_version,
             event.producer_run_id,
             event.producer_sequence,
-            naive_utc(event.produced_at),
+            to_flink_sql_timestamp(event.produced_at),
             event.event_id,
             event.tenant_id,
             event.device_id,
             event.metric_name,
             event.metric_value,
-            naive_utc(event.event_time),
+            to_flink_sql_timestamp(event.event_time),
             event.region,
             event.firmware,
             event.injected_duplicate,
@@ -204,6 +229,50 @@ class RawEventTimestampAssigner(TimestampAssigner):
         return event_time_ms_for_watermark(value)
 
 
+class TenantKeyedStateFunction(KeyedProcessFunction):
+    """Count valid records per tenant while preserving the original row."""
+
+    def open(self, runtime_context) -> None:
+        self.tenant_record_count = runtime_context.get_state(
+            ValueStateDescriptor("tenant-record-count", Types.LONG())
+        )
+        metric_group = runtime_context.get_metrics_group()
+        self.keyed_records = metric_group.counter("lab_keyed_records")
+        self.hot_tenant_state_count = 0
+        metric_group.gauge(
+            "lab_hot_tenant_state_count",
+            lambda: self.hot_tenant_state_count,
+        )
+        self.subtask_index = runtime_context.get_index_of_this_subtask()
+        self.attempt_number = runtime_context.get_attempt_number()
+
+    def process_element(self, value, ctx):
+        tenant_id = str(ctx.get_current_key())
+        current_count = self.tenant_record_count.value()
+        next_count = (int(current_count) if current_count is not None else 0) + 1
+        self.tenant_record_count.update(next_count)
+        self.keyed_records.inc()
+
+        if tenant_id == HOT_TENANT_ID:
+            # Every function instance publishes the gauge, but only the one that
+            # owns tenant-hot ever reports a positive value.
+            self.hot_tenant_state_count = next_count
+            # Restrict logarithmic milestone logs to this one lab key. Logging
+            # count=1 for every possible tenant would scale with key cardinality.
+            if is_decimal_milestone(next_count):
+                log_json(
+                    logging.INFO,
+                    "keyed_state_milestone",
+                    tenant_id=tenant_id,
+                    tenant_record_count=next_count,
+                    state_name="tenant-record-count",
+                    subtask_index=self.subtask_index,
+                    attempt_number=self.attempt_number,
+                )
+
+        yield value
+
+
 class ObserveLatenessFunction(ProcessFunction):
     """Capture the current watermark at arrival before writing to ClickHouse."""
 
@@ -213,7 +282,7 @@ class ObserveLatenessFunction(ProcessFunction):
         )
 
     def process_element(self, value, ctx):
-        event_time_ms = int(value[14])
+        event_time_ms = int(value[EVENT_TIME_MS_INDEX])
         watermark_ms = normalize_watermark_ms(
             ctx.timer_service().current_watermark()
         )
@@ -230,7 +299,7 @@ class ObserveLatenessFunction(ProcessFunction):
 
         # Drop the internal event_time_ms field, then append observation fields.
         yield Row(
-            *[value[index] for index in range(14)],
+            *[value[index] for index in range(EVENT_TIME_MS_INDEX)],
             processed_at,
             watermark_at_arrival,
             is_late,
@@ -238,6 +307,7 @@ class ObserveLatenessFunction(ProcessFunction):
         )
 
 
+# External sources and sinks.
 def build_source() -> KafkaSource:
     return (
         KafkaSource.builder()
@@ -328,6 +398,7 @@ def build_clickhouse_sink() -> JdbcSink:
     return JdbcSink(j_jdbc_sink=java_sink)
 
 
+# Job graph assembly. Read this function first.
 def main() -> None:
     if PARALLELISM < 1 or OUT_OF_ORDER_SECONDS < 0 or WATERMARK_IDLE_SECONDS < 1:
         raise ValueError("parallelism/idleness must be positive; out-of-order >= 0")
@@ -350,6 +421,7 @@ def main() -> None:
         out_of_order_seconds=OUT_OF_ORDER_SECONDS,
         watermark_idle_seconds=WATERMARK_IDLE_SECONDS,
         parse_error_log_sample_rate=PARSE_ERROR_LOG_SAMPLE_RATE,
+        keyby_lab_enabled=ENABLE_KEYBY_LAB,
     )
 
     env = StreamExecutionEnvironment.get_execution_environment()
@@ -399,8 +471,20 @@ def main() -> None:
         .uid("kafka-sink-telemetry-dlq")
     )
 
+    valid_stream = parsed_stream
+    if ENABLE_KEYBY_LAB:
+        valid_stream = (
+            parsed_stream.key_by(
+                lambda value: value[TENANT_ID_INDEX],
+                key_type=Types.STRING(),
+            )
+            .process(TenantKeyedStateFunction(), output_type=PARSED_TYPE)
+            .name("count-records-by-tenant")
+            .uid("count-records-by-tenant")
+        )
+
     enriched_stream = (
-        parsed_stream.process(
+        valid_stream.process(
             ObserveLatenessFunction(), output_type=SINK_TYPE
         )
         .name("observe-watermark-and-lateness")

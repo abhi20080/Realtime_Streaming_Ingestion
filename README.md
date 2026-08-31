@@ -24,6 +24,37 @@ This is a standalone sibling of the simpler baseline lab. It uses different
 host ports, its own Compose project, and independent volumes, so both projects
 can run at the same time.
 
+## How to read this repository
+
+Start with the executable entry points near the bottom of each Python file.
+They show the runtime order; the classes and helpers above them support that
+order.
+
+```text
+producer/producer.py
+  main → run → WorkloadGenerator.next_batch → Kafka telemetry.raw
+
+flink/job.py
+  main → KafkaSource → ParseValidateFunction
+                       ├─ invalid → Kafka telemetry.dlq
+                       └─ valid → optional TenantKeyedStateFunction
+                                  → ObserveLatenessFunction → ClickHouse
+```
+
+Use this map to keep record processing, lab control, and verification separate:
+
+| Path | Start here | Responsibility |
+|---|---|---|
+| Record processing | [`producer/producer.py`](producer/producer.py), then [`flink/job.py`](flink/job.py) | Generate records and assemble the live Flink graph. |
+| Pure transformation logic | [`flink/logic.py`](flink/logic.py) | Validate payloads, calculate event-time results, and build DLQ records without requiring PyFlink. |
+| Lab control | [`Makefile`](Makefile), then [`scripts/keyby_lab.py`](scripts/keyby_lab.py) | Start the lab and switch or inspect the optional `keyBy` experiment. This code never processes records. |
+| Storage model | [`clickhouse/init.sql`](clickhouse/init.sql) | Define the destination table and the SQL views used by Grafana. |
+| Verification | [`scripts/smoke.sh`](scripts/smoke.sh), then [`tests/`](tests/) | Reconcile one live run end to end and check isolated pure logic/configuration. |
+
+[`ARCHITECTURE.md`](ARCHITECTURE.md) explains why the boundaries and delivery
+semantics exist. [`TESTING.md`](TESTING.md) explains the three verification
+levels and which checks mutate the running lab.
+
 
 ## Requirements
 
@@ -175,6 +206,11 @@ make init                   # Explicitly create telemetry.raw and telemetry.dlq
 make submit                 # Submit the named PyFlink streaming job
 make produce-small          # Run a short anomaly workload
 make produce-observable     # Run a longer dashboard-friendly workload
+make keyby-on               # Switch the running job to the optional keyBy graph
+make produce-keyby          # Generate the controlled hot-tenant workload
+make observe-keyby          # Print graph, state, and shuffle evidence
+make verify-keyby           # Check the live keyBy experiment without changing it
+make keyby-off              # Return to the normal graph from a savepoint
 make status                 # Compose service status
 make lag                    # Partition-level Flink consumer lag
 make checkpoints            # Flink REST job overview

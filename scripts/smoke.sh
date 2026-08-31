@@ -9,6 +9,7 @@ clickhouse_password=""
 smoke_log=$(mktemp -t telemetry-monitoring-smoke.XXXXXX)
 trap 'rm -f "$smoke_log"' EXIT
 
+# Shared probes used by the linear smoke workflow below.
 wait_for_http() {
   local name=$1
   local url=$2
@@ -41,6 +42,7 @@ clickhouse_scalar() {
     --query "$query" 2>/dev/null | tr -d '[:space:]'
 }
 
+# Start the stack and capture its effective runtime configuration.
 echo "Starting the monitored lab..."
 "${compose[@]}" up -d kafka kafka-ui clickhouse jobmanager taskmanager prometheus grafana
 "${compose[@]}" run --rm kafka-init
@@ -65,6 +67,7 @@ raw_before=$(kafka_offset_sum telemetry.raw)
 dlq_before=$(kafka_offset_sum telemetry.dlq)
 rows_before=$(clickhouse_scalar "SELECT count() FROM perfmon.telemetry_events")
 
+# Produce one run and reconcile it across Kafka, Flink, and ClickHouse.
 echo "Producing a deterministic workload with every anomaly enabled..."
 "${compose[@]}" --profile tools run --rm producer \
   --rate 200 --count 2000 --seed 20260823 \
@@ -132,6 +135,7 @@ if ((run_rows + dlq_delta != attempted)); then
   exit 1
 fi
 
+# Verify the persisted anomaly and event-time semantics.
 IFS=$'\t' read -r duplicate_rows injected_late_rows observed_late_rows hot_rows \
   watermark_rows reversed_timeline_rows < <(
   "${compose[@]}" exec -T clickhouse clickhouse-client \
@@ -166,6 +170,7 @@ if ((latency_minutes == 0)); then
   exit 1
 fi
 
+# Verify that every observability surface has live data.
 targets_summary=""
 for ((i = 1; i <= 30; i++)); do
   targets_summary=$(curl -fsS http://localhost:19090/api/v1/targets | python3 -c '
