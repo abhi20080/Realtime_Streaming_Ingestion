@@ -23,18 +23,18 @@ from pyflink.common.serialization import SimpleStringSchema
 from pyflink.common.watermark_strategy import TimestampAssigner
 from pyflink.datastream import (
     CheckpointingMode,
-    ExternalizedCheckpointCleanup,
     KeyedProcessFunction,
     ProcessFunction,
     StreamExecutionEnvironment,
 )
 from pyflink.datastream.output_tag import OutputTag
+from pyflink.datastream.checkpoint_config import ExternalizedCheckpointRetention
 from pyflink.datastream.state import ValueStateDescriptor
 from pyflink.datastream.connectors.jdbc import (
     JdbcConnectionOptions,
     JdbcExecutionOptions,
-    JdbcSink,
 )
+from pyflink.datastream.connectors.base import Sink
 from pyflink.datastream.connectors.kafka import (
     DeliveryGuarantee,
     KafkaOffsetsInitializer,
@@ -308,7 +308,7 @@ def build_dlq_sink() -> KafkaSink:
     )
 
 
-def build_clickhouse_sink() -> JdbcSink:
+def build_clickhouse_sink() -> Sink:
     connection_options = (
         JdbcConnectionOptions.JdbcConnectionOptionsBuilder()
         .with_url(CLICKHOUSE_URL)
@@ -367,8 +367,8 @@ def main() -> None:
     checkpoint_config.set_min_pause_between_checkpoints(2_000)
     checkpoint_config.set_checkpoint_timeout(60_000)
     checkpoint_config.set_max_concurrent_checkpoints(1)
-    checkpoint_config.enable_externalized_checkpoints(
-        ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION
+    checkpoint_config.set_externalized_checkpoint_retention(
+        ExternalizedCheckpointRetention.RETAIN_ON_CANCELLATION
     )
 
     # Assign event time at the FLIP-27 source. KafkaSource can then track
@@ -422,7 +422,7 @@ def main() -> None:
         .uid("observe-watermark-and-lateness")
     )
     (
-        enriched_stream.add_sink(build_clickhouse_sink())
+        enriched_stream.sink_to(build_clickhouse_sink())
         .name("clickhouse-jdbc-at-least-once-sink")
         .uid("clickhouse-jdbc-at-least-once-sink")
     )

@@ -69,9 +69,9 @@ levels and which checks mutate the running lab. Follow one concrete record in
 - Approximately 8–10 GB of Docker memory for the full metrics stack. Loki and
   Alloy are optional.
 
-The Flink containers run as `linux/amd64`. PyFlink 1.20.5 does not publish the
-required Linux ARM64 wheel, so Docker Desktop uses its compatibility layer on
-Apple Silicon.
+The Flink containers retain `linux/amd64` and Java 17. Docker Desktop uses its
+compatibility layer on Apple Silicon. Both the PyFlink client and workers use
+the same dedicated Python 3.11.16 environment inside the image.
 
 ## Quick start
 
@@ -260,19 +260,32 @@ deployment, optional logs, savepoint transitions, and the live smoke test.
 
 | Component | Version |
 |---|---:|
-| Apache Kafka | 3.9.2 |
-| Redpanda Console | 3.10.0 |
-| Apache Flink / PyFlink | 1.20.5 |
-| Kafka connector | 3.4.0-1.20 |
-| JDBC connector | 3.3.0-1.20 |
-| ClickHouse JDBC | 0.9.7 |
-| ClickHouse | 25.8 |
+| Apache Kafka | 4.3.1 |
+| Redpanda Console | 3.11.0 |
+| Apache Flink / PyFlink | 2.2.1 |
+| Kafka connector | 5.0.0-2.2 |
+| JDBC connector | 4.1.0-2.2 |
+| ClickHouse JDBC | 0.9.8 |
+| ClickHouse | 26.3.30.9 |
 | Prometheus | 3.14.0 |
-| Grafana | 13.1.3 |
+| Grafana | 13.2.1 |
 | Grafana ClickHouse datasource | 4.20.0 |
 | JMX Exporter | 1.6.0 |
-| Loki | 3.7.3 |
-| Alloy | 1.18.1 |
+| Loki | 3.7.7 |
+| Alloy | 1.19.2 |
+| Producer confluent-kafka | 2.15.0 |
+| Python (producer / Flink) | 3.11.16 |
+| uv | 0.12.10 |
+| Maven | 3.9.16 |
+
+Flink 2.2.1 is paired with the Kafka and JDBC connector versions listed above
+because their [published compatibility matrix](https://flink.apache.org/downloads/)
+includes Flink 2.2. This upgrade starts from empty lab storage; restoring
+checkpoints or savepoints from Flink 1.20 is not part of the supported workflow.
+Stop the old lab with `make reset`, then run `make deploy` and `make smoke`.
+Reset deletes only this Compose project's volumes, including monitoring history;
+it preserves the local `.env` credentials. Subsequent keyBy transitions and
+`make flink-reset` continue to use savepoints created by the upgraded runtime.
 
 ## Troubleshooting
 

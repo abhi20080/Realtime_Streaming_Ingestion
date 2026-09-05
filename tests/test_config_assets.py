@@ -63,11 +63,11 @@ def test_required_versions_and_optional_logs_profile_are_pinned() -> None:
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
     services = compose["services"]
 
-    assert services["kafka"]["image"] == "telemetry-monitoring-kafka:3.9.2-jmx"
-    assert services["clickhouse"]["image"] == "clickhouse/clickhouse-server:25.8"
-    assert services["jobmanager"]["image"] == "telemetry-monitoring-flink:1.20.5-py310"
+    assert services["kafka"]["image"] == "telemetry-monitoring-kafka:4.3.1-jmx"
+    assert services["clickhouse"]["image"] == "clickhouse/clickhouse-server:26.3.30.9"
+    assert services["jobmanager"]["image"] == "telemetry-monitoring-flink:2.2.1-py311"
     assert services["prometheus"]["image"] == "prom/prometheus:v3.14.0"
-    assert services["grafana"]["image"] == "grafana/grafana:13.1.3"
+    assert services["grafana"]["image"] == "grafana/grafana:13.2.1"
     assert (
         services["grafana"]["environment"]["GF_PLUGINS_PREINSTALL_SYNC"]
         == "grafana-clickhouse-datasource@4.20.0"

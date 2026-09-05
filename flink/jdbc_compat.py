@@ -1,20 +1,19 @@
-"""Adapt PyFlink 1.20 to the pinned JDBC 3.3 connector.
+"""Adapt PyFlink 2.2 to the pinned JDBC 4.1 Sink V2 connector.
 
 The connector moved the statement-builder method used by PyFlink. Keep this
 version-specific Java bridge separate from the pipeline graph and sink policy.
 Revalidate it with the live smoke test whenever either dependency changes.
 """
 
-from pyflink.datastream.connectors.jdbc import JdbcSink
+from pyflink.datastream.connectors.base import Sink
 from pyflink.java_gateway import get_gateway
 from pyflink.util.java_utils import to_jarray
 
 
 def build_compatible_jdbc_sink(insert_sql, sink_type, execution_options, connection_options):
     """Build the existing at-least-once sink using the connector's row builder."""
-    # PyFlink 1.20 calls a statement-builder method that moved in JDBC
-    # connector 3.3.  Reflecting on RowJdbcOutputFormat keeps the public Python
-    # Row API while using the requested connector release.
+    # PyFlink's legacy JdbcSink wrapper still targets the removed Java factory.
+    # Reuse the connector's typed Row binder, then wrap its Sink V2 builder.
     gateway = get_gateway()
     jdbc_type_util = gateway.jvm.org.apache.flink.connector.jdbc.utils.JdbcTypeUtil
     sql_types = [
@@ -36,10 +35,11 @@ def build_compatible_jdbc_sink(insert_sql, sink_type, execution_options, connect
     statement_builder = builder_method.invoke(
         None, to_jarray(gateway.jvm.Object, [java_sql_types])
     )
-    java_sink = gateway.jvm.org.apache.flink.connector.jdbc.JdbcSink.sink(
-        insert_sql,
-        statement_builder,
-        execution_options._j_jdbc_execution_options,
-        connection_options._j_jdbc_connection_options,
+    java_sink = (
+        gateway.jvm.org.apache.flink.connector.jdbc.core.datastream.sink.JdbcSink
+        .builder()
+        .withQueryStatement(insert_sql, statement_builder)
+        .withExecutionOptions(execution_options._j_jdbc_execution_options)
+        .buildAtLeastOnce(connection_options._j_jdbc_connection_options)
     )
-    return JdbcSink(j_jdbc_sink=java_sink)
+    return Sink(java_sink)

@@ -210,7 +210,7 @@ def _plan_node_text(node: Mapping[str, Any]) -> str:
 
 
 def plan_nodes(payload: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
-    """Return plan nodes from Flink 1.20's nested REST response."""
+    """Return plan nodes from Flink's nested REST response."""
 
     document = payload.get("plan")
     if not isinstance(document, Mapping):

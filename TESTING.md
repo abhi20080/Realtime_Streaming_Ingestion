@@ -24,6 +24,15 @@ refactoring their implementation does not require Docker or a running lab.
 
 ## 2. Live reconciliation smoke test
 
+The Flink image build first constructs both pipeline graphs against the actual
+PyFlink and Java connector jars, without contacting Kafka or ClickHouse. This
+checks the JDBC Sink V2 bridge, serializers, and checkpoint-retention API that
+the host's pure-Python tests cannot exercise. Run it independently with:
+
+```bash
+docker compose run --rm --no-deps jobmanager python /opt/flink/usrlib/check_runtime.py
+```
+
 Do not run another producer at the same time.
 
 ```bash
@@ -106,3 +115,30 @@ make smoke
 ```
 
 The second smoke result should reconcile independently of the first run.
+
+## Upgrade validation (2026-09-05)
+
+The pinned Flink 2.2.1 / Kafka 4.3.1 / ClickHouse 26.3.30.9 stack was tested
+from empty project volumes on Docker Desktop, using amd64 Flink emulation.
+
+| Check | Observed result |
+|---|---|
+| Unit tests, complexity, configuration | 93 tests passed; all static checks passed |
+| JVM graph construction | Baseline and keyBy graphs passed during image build |
+| Fresh-stack smoke | 2,097 inputs = 2,076 valid rows + 21 DLQ records |
+| Monitoring | 5/5 targets, 4/4 dashboards, both required datasource health checks passed |
+| Keyed workload | 20,000 rows; tenant-hot state matched 18,978 rows |
+| Keyed savepoint restoration | 1,000 additional tenant-hot events advanced saved state to 19,978 |
+| TaskManager crash during production | All 12,000 unique records arrived; 12,002 rows including replay; checkpoint restored |
+| ClickHouse outage (35 seconds) | All 12,000 unique records arrived; 12,000 rows; checkpoints resumed |
+| Optional logs | Native Loki/Alloy configuration checks passed; live project logs queried from Loki |
+| Return to baseline | keyBy-off restored successfully; final smoke reconciled 2,097 inputs again; four tasks running |
+
+Flink 2.2.1 emits repeated `pendingCommittables` metric-registration warnings
+for Sink V2 committers. Its
+[committable collector](https://github.com/apache/flink/blob/release-2.2.1/flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/sink/committables/CommittableCollector.java)
+registers the gauge again when copying checkpoint state. The original metric
+remained exposed, and reconciliation, recovery, and the lab's dashboard checks
+passed. This upstream logging issue remains visible; it has not been suppressed
+or patched in the Flink distribution. These results establish the tested lab
+scenarios, not compatibility with old checkpoints or every upstream feature.

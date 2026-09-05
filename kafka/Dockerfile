@@ -1,4 +1,4 @@
-FROM apache/kafka:3.9.2
+FROM apache/kafka:4.3.1
 
 USER root
 RUN mkdir -p /opt/jmx-exporter

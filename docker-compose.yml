@@ -20,11 +20,14 @@ x-flink-properties: &flink-properties |
   jobmanager.rpc.address: jobmanager
   taskmanager.numberOfTaskSlots: ${FLINK_PARALLELISM:-4}
   parallelism.default: ${FLINK_PARALLELISM:-4}
+  python.executable: /opt/flink/venv/bin/python
+  python.client.executable: /opt/flink/venv/bin/python
   execution.checkpointing.interval: 10s
   execution.checkpointing.mode: EXACTLY_ONCE
   execution.checkpointing.min-pause: 2s
   execution.checkpointing.timeout: 60s
   execution.checkpointing.max-concurrent-checkpoints: 1
+  execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
   execution.checkpointing.dir: file:///opt/flink/checkpoints
   execution.checkpointing.savepoint-dir: file:///opt/flink/savepoints
   restart-strategy.type: fixed-delay
@@ -39,7 +42,7 @@ x-flink-properties: &flink-properties |
 
 services:
   kafka:
-    image: telemetry-monitoring-kafka:3.9.2-jmx
+    image: telemetry-monitoring-kafka:4.3.1-jmx
     build:
       context: ./kafka
     hostname: kafka
@@ -74,7 +77,7 @@ services:
       lab.service: kafka
 
   kafka-init:
-    image: telemetry-monitoring-kafka:3.9.2-jmx
+    image: telemetry-monitoring-kafka:4.3.1-jmx
     build:
       context: ./kafka
     depends_on:
@@ -99,7 +102,7 @@ services:
       lab.service: kafka-init
 
   kafka-ui:
-    image: docker.redpanda.com/redpandadata/console:v3.10.0
+    image: docker.redpanda.com/redpandadata/console:v3.11.0
     hostname: kafka-ui
     ports:
       - "127.0.0.1:18080:8080"
@@ -112,7 +115,7 @@ services:
       lab.service: kafka-ui
 
   clickhouse:
-    image: clickhouse/clickhouse-server:25.8
+    image: clickhouse/clickhouse-server:26.3.30.9
     hostname: clickhouse
     ports:
       - "127.0.0.1:18123:8123"
@@ -139,7 +142,7 @@ services:
       lab.service: clickhouse
 
   jobmanager:
-    image: telemetry-monitoring-flink:1.20.5-py310
+    image: telemetry-monitoring-flink:2.2.1-py311
     platform: linux/amd64
     build:
       context: ./flink
@@ -168,7 +171,7 @@ services:
       lab.service: flink-jobmanager
 
   taskmanager:
-    image: telemetry-monitoring-flink:1.20.5-py310
+    image: telemetry-monitoring-flink:2.2.1-py311
     platform: linux/amd64
     build:
       context: ./flink
@@ -239,7 +242,7 @@ services:
       lab.service: prometheus
 
   grafana:
-    image: grafana/grafana:13.1.3
+    image: grafana/grafana:13.2.1
     hostname: grafana
     ports:
       - "127.0.0.1:13000:3000"
@@ -267,7 +270,7 @@ services:
       lab.service: grafana
 
   loki:
-    image: grafana/loki:3.7.3
+    image: grafana/loki:3.7.7
     hostname: loki
     profiles: ["logs"]
     ports:
@@ -280,7 +283,7 @@ services:
       lab.service: loki
 
   alloy:
-    image: grafana/alloy:v1.18.1
+    image: grafana/alloy:v1.19.2
     hostname: alloy
     profiles: ["logs"]
     ports:
