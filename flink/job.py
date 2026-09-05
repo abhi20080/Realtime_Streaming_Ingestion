@@ -42,8 +42,9 @@ from pyflink.datastream.connectors.kafka import (
     KafkaSink,
     KafkaSource,
 )
-from pyflink.java_gateway import get_gateway
-from pyflink.util.java_utils import to_jarray
+
+from jdbc_compat import build_compatible_jdbc_sink
+from row_mapping import INSERT_SQL, event_to_row_values, sink_row_values
 
 from logic import (
     ERROR_CATEGORIES,
@@ -53,7 +54,7 @@ from logic import (
     event_time_ms_for_watermark,
     is_decimal_milestone,
     normalize_watermark_ms,
-    parse_strict_true_false,
+    keyby_lab_enabled,
     validate_event,
 )
 
@@ -70,7 +71,7 @@ CLICKHOUSE_URL = os.getenv(
     "CLICKHOUSE_JDBC_URL", "jdbc:clickhouse://clickhouse:8123/perfmon"
 )
 CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "flink")
-CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "flink")
+CLICKHOUSE_PASSWORD = os.environ["CLICKHOUSE_PASSWORD"]
 PARALLELISM = int(os.getenv("FLINK_PARALLELISM", "4"))
 OUT_OF_ORDER_SECONDS = int(os.getenv("OUT_OF_ORDER_SECONDS", "10"))
 WATERMARK_IDLE_SECONDS = int(os.getenv("WATERMARK_IDLE_SECONDS", "30"))
@@ -78,9 +79,7 @@ CHECKPOINT_INTERVAL_MS = int(os.getenv("CHECKPOINT_INTERVAL_MS", "10000"))
 PARSE_ERROR_LOG_SAMPLE_RATE = float(
     os.getenv("PARSE_ERROR_LOG_SAMPLE_RATE", "0.05")
 )
-ENABLE_KEYBY_LAB = parse_strict_true_false(
-    os.getenv("ENABLE_KEYBY_LAB", "false"), setting_name="ENABLE_KEYBY_LAB"
-)
+ENABLE_KEYBY_LAB = keyby_lab_enabled(os.environ)
 
 
 PARSED_SCHEMA = [
@@ -156,12 +155,6 @@ def log_json(level: int, message: str, **fields) -> None:
     )
 
 
-def to_flink_sql_timestamp(value: datetime) -> datetime:
-    """Convert an aware datetime to Flink's timezone-free SQL timestamp."""
-
-    return value.astimezone(timezone.utc).replace(tzinfo=None)
-
-
 # Per-record Flink operators.
 class ParseValidateFunction(ProcessFunction):
     """Validate records, emit valid typed rows, and side-output DLQ JSON."""
@@ -204,24 +197,7 @@ class ParseValidateFunction(ProcessFunction):
             return
 
         self.records_valid.inc()
-        event = result.event
-        yield Row(
-            event.schema_version,
-            event.producer_run_id,
-            event.producer_sequence,
-            to_flink_sql_timestamp(event.produced_at),
-            event.event_id,
-            event.tenant_id,
-            event.device_id,
-            event.metric_name,
-            event.metric_value,
-            to_flink_sql_timestamp(event.event_time),
-            event.region,
-            event.firmware,
-            event.injected_duplicate,
-            event.injected_late,
-            event.event_time_ms,
-        )
+        yield Row(*event_to_row_values(result.event))
 
 
 class RawEventTimestampAssigner(TimestampAssigner):
@@ -297,14 +273,9 @@ class ObserveLatenessFunction(ProcessFunction):
                 watermark_ms / 1_000, tz=timezone.utc
             ).replace(tzinfo=None)
 
-        # Drop the internal event_time_ms field, then append observation fields.
-        yield Row(
-            *[value[index] for index in range(EVENT_TIME_MS_INDEX)],
-            processed_at,
-            watermark_at_arrival,
-            is_late,
-            lateness_ms,
-        )
+        yield Row(*sink_row_values(
+            value, processed_at, watermark_at_arrival, is_late, lateness_ms
+        ))
 
 
 # External sources and sinks.
@@ -353,49 +324,9 @@ def build_clickhouse_sink() -> JdbcSink:
         .with_max_retries(int(os.getenv("JDBC_MAX_RETRIES", "5")))
         .build()
     )
-    insert_sql = """
-        INSERT INTO perfmon.telemetry_events
-        (
-            schema_version, producer_run_id, producer_sequence, produced_at,
-            event_id, tenant_id, device_id, metric_name, metric_value,
-            event_time, region, firmware, injected_duplicate, injected_late,
-            flink_processed_at, watermark_at_arrival, is_late_at_flink,
-            lateness_ms
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """
-
-    # PyFlink 1.20 calls a statement-builder method that moved in JDBC
-    # connector 3.3.  Reflecting on RowJdbcOutputFormat keeps the public Python
-    # Row API while using the requested connector release.
-    gateway = get_gateway()
-    jdbc_type_util = gateway.jvm.org.apache.flink.connector.jdbc.utils.JdbcTypeUtil
-    sql_types = [
-        jdbc_type_util.typeInformationToSqlType(field_type.get_java_type_info())
-        for field_type in SINK_TYPE.get_field_types()
-    ]
-    java_sql_types = to_jarray(gateway.jvm.int, sql_types)
-    output_format_class = gateway.jvm.Class.forName(
-        "org.apache.flink.connector.jdbc.internal.RowJdbcOutputFormat",
-        False,
-        gateway.jvm.Thread.currentThread().getContextClassLoader(),
+    return build_compatible_jdbc_sink(
+        INSERT_SQL, SINK_TYPE, execution_options, connection_options
     )
-    int_array_class = to_jarray(gateway.jvm.int, []).getClass()
-    builder_method = output_format_class.getDeclaredMethod(
-        "createRowJdbcStatementBuilder",
-        to_jarray(gateway.jvm.Class, [int_array_class]),
-    )
-    builder_method.setAccessible(True)
-    statement_builder = builder_method.invoke(
-        None, to_jarray(gateway.jvm.Object, [java_sql_types])
-    )
-    java_sink = gateway.jvm.org.apache.flink.connector.jdbc.JdbcSink.sink(
-        insert_sql,
-        statement_builder,
-        execution_options._j_jdbc_execution_options,
-        connection_options._j_jdbc_connection_options,
-    )
-    return JdbcSink(j_jdbc_sink=java_sink)
 
 
 # Job graph assembly. Read this function first.

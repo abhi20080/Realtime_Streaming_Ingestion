@@ -112,6 +112,51 @@ class ValidationTests(unittest.TestCase):
         result = validate_event("{}")
         self.assertLessEqual(len(result.error_detail), MAX_ERROR_DETAIL_LENGTH)
 
+    def test_missing_fields_take_precedence_over_invalid_present_values(self):
+        payload = valid_payload()
+        del payload["event_id"]
+        payload["schema_version"] = True
+
+        result = validate_event(json.dumps(payload))
+
+        self.assertEqual(result.error_category, MISSING_FIELD)
+        self.assertEqual(result.error_detail, "missing required field(s): event_id")
+
+    def test_typed_field_validation_order_and_details_are_stable(self):
+        cases = (
+            (
+                "schema_version",
+                True,
+                "schema_version must be an integer from 1 through 65535",
+            ),
+            (
+                "producer_sequence",
+                LONG_MAX + 1,
+                f"producer_sequence must be an integer from 0 through {LONG_MAX}",
+            ),
+            ("metric_value", True, "metric_value must be numeric"),
+            ("metric_value", float("inf"), "metric_value must be finite"),
+            ("injected_duplicate", "false", "injected_duplicate must be boolean"),
+            ("producer_run_id", " ", "producer_run_id must be a non-empty string"),
+        )
+        for field, value, detail in cases:
+            with self.subTest(field=field, value=value):
+                payload = valid_payload()
+                payload[field] = value
+                result = validate_event(json.dumps(payload))
+                self.assertEqual(result.error_category, INVALID_TYPE)
+                self.assertEqual(result.error_detail, detail)
+
+    def test_boolean_checks_precede_string_checks(self):
+        payload = valid_payload()
+        payload["producer_run_id"] = ""
+        payload["injected_duplicate"] = "false"
+
+        result = validate_event(json.dumps(payload))
+
+        self.assertEqual(result.error_category, INVALID_TYPE)
+        self.assertEqual(result.error_detail, "injected_duplicate must be boolean")
+
 
 class EventTimeTests(unittest.TestCase):
     def test_source_watermark_timestamp_uses_only_valid_event_time(self):

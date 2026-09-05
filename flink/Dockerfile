@@ -28,7 +28,7 @@ COPY --from=dependencies /runtime-jars/ /opt/flink/lib/
 # The official 1.20.5 image already ships the Prometheus reporter as the
 # /opt/flink/plugins/metrics-prometheus plugin; FLINK_PROPERTIES enables it.
 
-COPY logic.py job.py /opt/flink/usrlib/
+COPY logic.py row_mapping.py jdbc_compat.py job.py /opt/flink/usrlib/
 RUN mkdir -p /opt/flink/checkpoints /opt/flink/savepoints && \
     chown -R flink:flink /opt/flink/usrlib /opt/flink/checkpoints /opt/flink/savepoints
 

@@ -3,6 +3,7 @@
 .idea/
 .vscode/
 .pytest_cache/
+.ruff_cache/
 __pycache__/
 *.py[cod]
 *.log
@@ -11,5 +12,10 @@ htmlcov/
 dist/
 build/
 target/
-CURRICULUM_*
-LEARNING.md
+kafka/jmx_prometheus_javaagent-*.jar
+kafka/jmx_prometheus_javaagent-*.jar.tmp.*
+# Share reusable guides; keep personal curriculum notes local.
+docs/*
+!docs/LEARNING.md
+!docs/EVENT_FLOW.md
+!docs/OPERATIONS.md

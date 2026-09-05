@@ -33,8 +33,8 @@ ClickHouse tables/views ─────────▶ Grafana ClickHouse dataso
 
 Docker JSON logs ─▶ Alloy ─▶ Loki ─▶ Grafana (optional profile)
 
-scripts/keyby_lab.py ─▶ Flink REST + Prometheus (read-only evidence)
-                     └─▶ savepoint + Compose restart (explicit mode changes)
+scripts/keyby_lab.py ─┬─▶ keyby_evidence.py ─▶ Flink REST + Prometheus
+                     └─▶ keyby_control.py ──▶ savepoint + Compose restart
 ```
 
 The optional `keyBy` branch is disabled by default. It adds one keyed-state
@@ -45,8 +45,9 @@ The dashboards intentionally combine system metrics with data-level SQL:
 metrics explain runtime pressure, while persisted timestamps and flags explain
 what happened to individual records.
 
-All published ports bind to `127.0.0.1`; the learning credentials and control
-APIs are not intended for a shared or production network. The optional Alloy
+All published ports bind to `127.0.0.1`; generated local credentials remain in
+the gitignored `.env` file, and the control APIs are not intended for a shared
+or production network. The optional Alloy
 profile mounts the Docker socket with a read-only filesystem flag, as required
 for container discovery. Docker's socket API itself is privileged even through
 a read-only mount, so enable that profile only on a trusted development host.
@@ -87,3 +88,12 @@ a read-only mount, so enable that profile only on a trusted development host.
   checkpoints; Flink checkpoint state remains authoritative for recovery.
 - Main JDBC and DLQ Kafka sinks are at-least-once. Replays are observable by
   comparing `event_id`, `producer_run_id`, and `producer_sequence`.
+
+## Following the implementation
+
+Start at `producer/producer.py:run` and `flink/job.py:main`. Workload generation
+and Kafka delivery accounting live in separate producer modules, and
+`flink/row_mapping.py` makes the row and INSERT ordering explicit. The
+[record walkthrough](docs/EVENT_FLOW.md) connects those boundaries with sample
+values. `flink/jdbc_compat.py` isolates the version-specific Java bridge; it does
+not change the sink's delivery guarantee.

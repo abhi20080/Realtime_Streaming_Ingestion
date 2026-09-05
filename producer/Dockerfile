@@ -12,7 +12,7 @@ RUN useradd --create-home --uid 10001 producer
 COPY pyproject.toml ./
 RUN uv pip install --system --no-cache "confluent-kafka==2.11.1"
 
-COPY producer.py ./
+COPY producer.py workload.py delivery.py logging_utils.py ./
 USER producer
 
 ENTRYPOINT ["python", "-u", "producer.py"]

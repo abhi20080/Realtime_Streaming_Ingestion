@@ -7,7 +7,7 @@ x-flink-environment: &flink-environment
   KAFKA_GROUP_ID: telemetry-flink-monitoring-v1
   CLICKHOUSE_JDBC_URL: jdbc:clickhouse://clickhouse:8123/perfmon
   CLICKHOUSE_USER: ${CLICKHOUSE_USER:-flink}
-  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-flink}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Run make credentials first}
   FLINK_PARALLELISM: ${FLINK_PARALLELISM:-4}
   OUT_OF_ORDER_SECONDS: ${OUT_OF_ORDER_SECONDS:-10}
   WATERMARK_IDLE_SECONDS: ${WATERMARK_IDLE_SECONDS:-30}
@@ -121,11 +121,14 @@ services:
     environment:
       CLICKHOUSE_DB: perfmon
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-flink}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-flink}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Run make credentials first}
+      CLICKHOUSE_OBSERVER_USER: ${CLICKHOUSE_OBSERVER_USER:-observer}
+      CLICKHOUSE_OBSERVER_PASSWORD: ${CLICKHOUSE_OBSERVER_PASSWORD:?Run make credentials first}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
       - monitoring_clickhouse_data:/var/lib/clickhouse
-      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./clickhouse/init-users.sh:/docker-entrypoint-initdb.d/02-users.sh:ro
       - ./clickhouse/prometheus.xml:/etc/clickhouse-server/config.d/prometheus.xml:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q Ok"]
@@ -242,7 +245,9 @@ services:
       - "127.0.0.1:13000:3000"
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Run make credentials first}
+      CLICKHOUSE_OBSERVER_USER: ${CLICKHOUSE_OBSERVER_USER:-observer}
+      CLICKHOUSE_OBSERVER_PASSWORD: ${CLICKHOUSE_OBSERVER_PASSWORD:?Run make credentials first}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_PLUGINS_PREINSTALL_SYNC: grafana-clickhouse-datasource@4.20.0
     volumes:

@@ -29,11 +29,11 @@ datasources:
       host: clickhouse
       port: 9000
       protocol: native
-      username: observer
+      username: $CLICKHOUSE_OBSERVER_USER
       defaultDatabase: perfmon
       tlsSkipVerify: false
     secureJsonData:
-      password: observer
+      password: $CLICKHOUSE_OBSERVER_PASSWORD
 
   - name: Loki
     uid: loki

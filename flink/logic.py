@@ -45,6 +45,13 @@ def parse_strict_true_false(value: str, *, setting_name: str) -> bool:
     raise ValueError(f"{setting_name} must be exactly 'true' or 'false'")
 
 
+def keyby_lab_enabled(environment: Mapping[str, str]) -> bool:
+    """Enable the optional graph only when its environment setting is true."""
+    return parse_strict_true_false(
+        environment.get("ENABLE_KEYBY_LAB", "false"), setting_name="ENABLE_KEYBY_LAB"
+    )
+
+
 def is_decimal_milestone(value: int) -> bool:
     """Return whether value is one of 1, 10, 100, 1000, and so on."""
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -114,6 +121,45 @@ def _read_nonempty_string(payload: Mapping[str, Any], field: str) -> str:
     return value
 
 
+def _read_bounded_integer(
+    payload: Mapping[str, Any],
+    field: str,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = payload[field]
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not minimum <= value <= maximum
+    ):
+        raise _ValidationIssue(
+            INVALID_TYPE,
+            f"{field} must be an integer from {minimum} through {maximum}",
+        )
+    return value
+
+
+def _read_finite_number(payload: Mapping[str, Any], field: str) -> float:
+    value = payload[field]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _ValidationIssue(INVALID_TYPE, f"{field} must be numeric")
+    number = float(value)
+    if not math.isfinite(number):
+        raise _ValidationIssue(INVALID_TYPE, f"{field} must be finite")
+    return number
+
+
+def _read_boolean_flags(payload: Mapping[str, Any]) -> tuple[bool, bool]:
+    values: list[bool] = []
+    for field in ("injected_duplicate", "injected_late"):
+        value = payload[field]
+        if not isinstance(value, bool):
+            raise _ValidationIssue(INVALID_TYPE, f"{field} must be boolean")
+        values.append(value)
+    return values[0], values[1]
+
+
 def _parse_timestamp(payload: Mapping[str, Any], field: str) -> datetime:
     value = payload[field]
     if not isinstance(value, str):
@@ -143,76 +189,56 @@ def _parse_timestamp(payload: Mapping[str, Any], field: str) -> datetime:
     return normalized
 
 
-def validate_event(raw_payload: str) -> ValidationResult:
-    """Validate one Kafka value using only four bounded error categories."""
+def _decode_payload(raw_payload: str) -> Mapping[str, Any]:
     try:
         payload = json.loads(raw_payload)
     except (json.JSONDecodeError, UnicodeError) as exc:
-        return ValidationResult(
-            error_category=INVALID_JSON,
-            error_detail=bounded_error_detail(f"JSON decoding failed: {exc}"),
-        )
+        raise _ValidationIssue(
+            INVALID_JSON,
+            f"JSON decoding failed: {exc}",
+        ) from exc
     if not isinstance(payload, dict):
-        return ValidationResult(
-            error_category=INVALID_TYPE,
-            error_detail="top-level JSON value must be an object",
+        raise _ValidationIssue(
+            INVALID_TYPE,
+            "top-level JSON value must be an object",
         )
     missing = [field for field in REQUIRED_FIELDS if field not in payload]
     if missing:
-        return ValidationResult(
-            error_category=MISSING_FIELD,
-            error_detail=bounded_error_detail(
-                "missing required field(s): " + ", ".join(missing)
-            ),
+        raise _ValidationIssue(
+            MISSING_FIELD,
+            "missing required field(s): " + ", ".join(missing),
         )
+    return payload
 
+
+def _build_validated_event(payload: Mapping[str, Any]) -> ValidatedEvent:
+    schema_version = _read_bounded_integer(payload, "schema_version", 1, UINT16_MAX)
+    sequence = _read_bounded_integer(payload, "producer_sequence", 0, LONG_MAX)
+    metric_value = _read_finite_number(payload, "metric_value")
+    injected_duplicate, injected_late = _read_boolean_flags(payload)
+    return ValidatedEvent(
+        schema_version=schema_version,
+        producer_run_id=_read_nonempty_string(payload, "producer_run_id"),
+        producer_sequence=sequence,
+        produced_at=_parse_timestamp(payload, "produced_at"),
+        event_id=_read_nonempty_string(payload, "event_id"),
+        tenant_id=_read_nonempty_string(payload, "tenant_id"),
+        device_id=_read_nonempty_string(payload, "device_id"),
+        metric_name=_read_nonempty_string(payload, "metric_name"),
+        metric_value=metric_value,
+        event_time=_parse_timestamp(payload, "event_time"),
+        region=_read_nonempty_string(payload, "region"),
+        firmware=_read_nonempty_string(payload, "firmware"),
+        injected_duplicate=injected_duplicate,
+        injected_late=injected_late,
+    )
+
+
+def validate_event(raw_payload: str) -> ValidationResult:
+    """Validate one Kafka value using only four bounded error categories."""
     try:
-        schema_version = payload["schema_version"]
-        if (
-            isinstance(schema_version, bool)
-            or not isinstance(schema_version, int)
-            or not 1 <= schema_version <= UINT16_MAX
-        ):
-            raise _ValidationIssue(
-                INVALID_TYPE,
-                f"schema_version must be an integer from 1 through {UINT16_MAX}",
-            )
-        sequence = payload["producer_sequence"]
-        if (
-            isinstance(sequence, bool)
-            or not isinstance(sequence, int)
-            or not 0 <= sequence <= LONG_MAX
-        ):
-            raise _ValidationIssue(
-                INVALID_TYPE,
-                f"producer_sequence must be an integer from 0 through {LONG_MAX}",
-            )
-        metric_value = payload["metric_value"]
-        if isinstance(metric_value, bool) or not isinstance(metric_value, (int, float)):
-            raise _ValidationIssue(INVALID_TYPE, "metric_value must be numeric")
-        metric_value = float(metric_value)
-        if not math.isfinite(metric_value):
-            raise _ValidationIssue(INVALID_TYPE, "metric_value must be finite")
-        for field in ("injected_duplicate", "injected_late"):
-            if not isinstance(payload[field], bool):
-                raise _ValidationIssue(INVALID_TYPE, f"{field} must be boolean")
-
-        event = ValidatedEvent(
-            schema_version=schema_version,
-            producer_run_id=_read_nonempty_string(payload, "producer_run_id"),
-            producer_sequence=sequence,
-            produced_at=_parse_timestamp(payload, "produced_at"),
-            event_id=_read_nonempty_string(payload, "event_id"),
-            tenant_id=_read_nonempty_string(payload, "tenant_id"),
-            device_id=_read_nonempty_string(payload, "device_id"),
-            metric_name=_read_nonempty_string(payload, "metric_name"),
-            metric_value=metric_value,
-            event_time=_parse_timestamp(payload, "event_time"),
-            region=_read_nonempty_string(payload, "region"),
-            firmware=_read_nonempty_string(payload, "firmware"),
-            injected_duplicate=payload["injected_duplicate"],
-            injected_late=payload["injected_late"],
-        )
+        payload = _decode_payload(raw_payload)
+        event = _build_validated_event(payload)
     except _ValidationIssue as exc:
         return ValidationResult(error_category=exc.category, error_detail=exc.detail)
     return ValidationResult(event=event)

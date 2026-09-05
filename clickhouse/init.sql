@@ -102,9 +102,3 @@ SELECT
     countIf(injected_late AND NOT is_late_at_flink) AS injected_not_observed_late_rows,
     countIf(NOT injected_late AND is_late_at_flink) AS unexpected_observed_late_rows
 FROM perfmon.telemetry_events;
-
-CREATE USER IF NOT EXISTS observer
-IDENTIFIED WITH sha256_password BY 'observer';
-
-GRANT SELECT ON perfmon.* TO observer;
-GRANT SELECT ON system.* TO observer;

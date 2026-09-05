@@ -6,14 +6,21 @@ errors are separated from runtime and failure-recovery behavior.
 ## 1. Static and unit checks
 
 ```bash
+make credentials
+make complexity
 make validate
 make test
 ```
 
-These checks parse Compose, Kafka JMX Exporter, Loki, Prometheus, Grafana
-provisioning, and dashboard assets, then exercise event generation, anomaly
-flags, sequencing, producer statistics, bounded validation errors, DLQ
-envelopes, and lateness arithmetic.
+The complexity gate runs Ruff C901 across all Python code, including tests, and
+rejects any function or method above 8 without honoring inline suppressions.
+`make validate` includes that gate, then parses Compose, Kafka JMX Exporter,
+Loki, Prometheus, Grafana provisioning, and dashboard assets. The unit tests
+exercise event generation, anomaly flags, sequencing, producer lifecycle and
+statistics, bounded validation errors, DLQ envelopes, and lateness arithmetic. Row-contract tests also check the complete mapping
+from a validated event through Flink row order to JDBC columns and ClickHouse
+DDL. Command tests exercise Make targets using a fake Docker executable, so
+refactoring their implementation does not require Docker or a running lab.
 
 ## 2. Live reconciliation smoke test
 
@@ -61,7 +68,8 @@ These tests intentionally interrupt services. Keep Grafana, the Flink UI,
 4. Confirm a restart, temporary lag growth, catch-up, and a new completed
    checkpoint in the Flink UI.
 5. Compare `total_rows`, `unique_event_ids`, and duplicate sequence numbers in
-   `perfmon.v_pipeline_health` and Exercise 7's query.
+   `perfmon.v_pipeline_health` and the
+   [replay comparison query](docs/LEARNING.md#7-separate-intentional-duplicates-from-replay-duplicates).
 
 ### ClickHouse outage and backpressure
 

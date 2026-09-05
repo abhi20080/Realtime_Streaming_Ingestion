@@ -32,7 +32,7 @@ order.
 
 ```text
 producer/producer.py
-  main → run → WorkloadGenerator.next_batch → Kafka telemetry.raw
+  main → run → workload.WorkloadGenerator.next_batch → Kafka telemetry.raw
 
 flink/job.py
   main → KafkaSource → ParseValidateFunction
@@ -46,22 +46,26 @@ Use this map to keep record processing, lab control, and verification separate:
 | Path | Start here | Responsibility |
 |---|---|---|
 | Record processing | [`producer/producer.py`](producer/producer.py), then [`flink/job.py`](flink/job.py) | Generate records and assemble the live Flink graph. |
-| Pure transformation logic | [`flink/logic.py`](flink/logic.py) | Validate payloads, calculate event-time results, and build DLQ records without requiring PyFlink. |
-| Lab control | [`Makefile`](Makefile), then [`scripts/keyby_lab.py`](scripts/keyby_lab.py) | Start the lab and switch or inspect the optional `keyBy` experiment. This code never processes records. |
+| Workloads and delivery accounting | [`producer/workload.py`](producer/workload.py), [`producer/delivery.py`](producer/delivery.py) | Generate testable events and summarize Kafka acknowledgements. |
+| Pure transformation logic | [`flink/logic.py`](flink/logic.py), [`flink/row_mapping.py`](flink/row_mapping.py) | Validate payloads, calculate event-time results, build DLQ records, and map storage rows without requiring PyFlink. |
+| Lab commands | [`Makefile`](Makefile), then [`scripts/keyby_lab.py`](scripts/keyby_lab.py) | Start the lab and select an optional `keyBy` command. |
+| Mode changes and observation | [`scripts/keyby_control.py`](scripts/keyby_control.py), [`scripts/keyby_evidence.py`](scripts/keyby_evidence.py) | Follow savepoint transitions or collect read-only evidence. Shared REST access and job guards live in `keyby_common.py`. |
 | Storage model | [`clickhouse/init.sql`](clickhouse/init.sql) | Define the destination table and the SQL views used by Grafana. |
 | Verification | [`scripts/smoke.sh`](scripts/smoke.sh), then [`tests/`](tests/) | Reconcile one live run end to end and check isolated pure logic/configuration. |
 
 [`ARCHITECTURE.md`](ARCHITECTURE.md) explains why the boundaries and delivery
 semantics exist. [`TESTING.md`](TESTING.md) explains the three verification
-levels and which checks mutate the running lab.
+levels and which checks mutate the running lab. Follow one concrete record in
+[`docs/EVENT_FLOW.md`](docs/EVENT_FLOW.md); the JDBC compatibility adapter in
+`flink/jdbc_compat.py` can wait until you study connector internals.
 
 
 ## Requirements
 
 - Docker Desktop or Docker Engine with Docker Compose v2.
-- Python 3.11+ for the host-side smoke test; add
-  [uv](https://docs.astral.sh/uv/) for validation and unit tests. The normal
-  runtime commands themselves only need Docker.
+- Python 3.11+ for credential setup, lab control, and the host-side smoke test.
+  These commands use the standard library; add [uv](https://docs.astral.sh/uv/)
+  for validation and unit tests. Kafka and PyFlink dependencies run in Docker.
 - Approximately 8–10 GB of Docker memory for the full metrics stack. Loki and
   Alloy are optional.
 
@@ -72,10 +76,23 @@ Apple Silicon.
 ## Quick start
 
 ```bash
-cp .env.example .env
+make credentials
 make deploy
-make produce-small
+make produce-baseline
 make observe
+```
+
+`make deploy` downloads JMX Exporter once on the host with `curl` retries and
+caches it in `kafka/jmx_prometheus_javaagent-1.6.0.jar`. Docker copies that local
+file, avoiding BuildKit timeouts when following GitHub release redirects. The
+JAR is ignored by Git. Before building Kafka directly with Compose, run
+`make kafka-agent`.
+
+If you already downloaded the JAR in your browser, reuse it:
+
+```bash
+cp ~/Downloads/jmx_prometheus_javaagent-1.6.0.jar kafka/
+make deploy
 ```
 
 Open:
@@ -84,13 +101,45 @@ Open:
 |---|---|---|
 | Kafka Console | http://localhost:18080 | Topics, keys, partitions, offsets, consumer groups |
 | Flink UI | http://localhost:18081 | Job graph, checkpoints, backpressure, exceptions |
-| Grafana | http://localhost:13000 | Provisioned dashboards; default `admin` / `admin` |
+| Grafana | http://localhost:13000 | Provisioned dashboards; login is stored in `.env` |
 | Prometheus | http://localhost:19090 | Raw metrics, targets, PromQL |
 | ClickHouse HTTP | http://localhost:18123 | Server HTTP endpoint |
 
 Grafana is provisioned with Prometheus and a read-only ClickHouse user. The
 first startup can take an extra minute while Grafana installs the pinned
 ClickHouse datasource plugin.
+
+## Learn one behavior at a time
+
+The quick start sends 1,000 valid events in about ten seconds, with no injected
+duplicates, old timestamps, malformed JSON, or hot-tenant bias. Ordinary timing
+jitter and partition imbalance can still occur. Wait for the sink to catch up,
+then use `make observe` to inspect the result.
+
+Follow the [guided learning path](docs/LEARNING.md#learning-path): valid records
+→ intentional duplicates → malformed records and the DLQ → event time and
+watermarks → partition skew → `keyBy` state → failure recovery.
+Each exercise includes a prediction, commands, observations, and an explanation.
+The existing mixed workloads remain available when you want several dashboard
+signals at once.
+
+## Local credentials
+
+`make credentials` generates strong, independent passwords for ClickHouse,
+Grafana, and Grafana's read-only ClickHouse account. They are stored only in the
+gitignored `.env` file with permissions `0600`; `.env.example` intentionally
+contains no passwords. Make targets that use Compose generate `.env`
+automatically when it is missing.
+
+Rotate all three passwords without deleting named volumes:
+
+```bash
+make rotate-credentials
+```
+
+Rotation recreates the credential-consuming containers and resubmits the
+baseline Flink job so every service loads the new values. Existing Kafka,
+ClickHouse, Grafana, checkpoint, and savepoint volumes are retained.
 
 ## Generate an observable workload
 
@@ -192,53 +241,20 @@ records, source event-time lag, operator records in/out, busy/backpressured
 time, checkpoint duration/failures, and restarts. Custom `lab_*` metrics show
 validation and observed lateness.
 
-## Common commands
+## Commands and next steps
 
 ```bash
-make help                   # List every supported target and its purpose
-make deploy                 # Build, start, initialize, and submit the core lab
-make build                  # Build Kafka/JMX, Flink, and producer images
-make up                     # Start the core pipeline and metrics UI services
-make up-observability       # Start Prometheus/Grafana and required dependencies
-make up-logs                # Start optional Loki/Alloy log collection
-make stop-logs              # Stop Loki/Alloy while keeping the core lab running
-make init                   # Explicitly create telemetry.raw and telemetry.dlq
-make submit                 # Submit the named PyFlink streaming job
-make produce-small          # Run a short anomaly workload
-make produce-observable     # Run a longer dashboard-friendly workload
-make keyby-on               # Switch the running job to the optional keyBy graph
-make produce-keyby          # Generate the controlled hot-tenant workload
-make observe-keyby          # Print graph, state, and shuffle evidence
-make verify-keyby           # Check the live keyBy experiment without changing it
-make keyby-off              # Return to the normal graph from a savepoint
-make status                 # Compose service status
-make lag                    # Partition-level Flink consumer lag
-make checkpoints            # Flink REST job overview
-make validate               # Compose, YAML, and dashboard syntax
-make test                   # Fast unit tests
-make smoke                  # Build-independent live integration smoke test
-make teardown               # Stop everything and preserve named volumes
-make stop                   # Stop services and preserve volumes
-make reset                  # Delete this lab's containers and volumes
+make help                   # List supported commands
+make produce-baseline       # Valid records without injected anomalies
+make produce-small          # Short mixed anomaly workload
+make produce-observable     # Longer dashboard-friendly workload
+make test                   # Unit tests
+make validate               # Complexity and configuration checks
+make teardown               # Stop the lab and preserve its data
 ```
 
-`make deploy` is safe to run again: topic creation is idempotent and it skips
-Flink submission when `kafka-flink-clickhouse-monitoring` is already running.
-Optional Loki/Alloy collection remains a separate `make up-logs` choice.
-Use `make stop-logs` to reverse that choice without stopping Grafana or the
-core pipeline; the Loki/Alloy containers and named volumes are preserved for a
-later restart.
-`make teardown` stops the entire Compose project but preserves its named data
-volumes; use `make reset` only when you intentionally want a clean slate.
-
-`make reset` cannot affect the baseline lab because the Compose projects and
-volumes are independently named.
-
-Run `make smoke` without another producer writing concurrently. It uses a
-deterministic anomaly workload and verifies producer acknowledgements, raw/DLQ
-offsets, per-run ClickHouse counts, stage timestamps, latency views, all five
-Prometheus targets, both Grafana datasource health checks, and all four
-provisioned dashboards, including a representative live query from each.
+The [operations reference](docs/OPERATIONS.md) covers all commands, repeatable
+deployment, optional logs, savepoint transitions, and the live smoke test.
 
 ## Version pins
 
@@ -277,9 +293,10 @@ For application data panels, confirm ClickHouse has rows and Grafana's
 `ClickHouse` datasource health check succeeds:
 
 ```bash
-docker compose exec clickhouse clickhouse-client \
-  --user flink --password flink \
-  --query 'SELECT count() FROM perfmon.telemetry_events'
+docker compose exec -T clickhouse \
+  sh -ec 'clickhouse-client \
+    --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" \
+    --query "SELECT count() FROM perfmon.telemetry_events"'
 ```
 
 If the job is running but committed offsets look old, remember that Flink only

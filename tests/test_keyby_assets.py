@@ -8,42 +8,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_keyby_job_is_default_off() -> None:
-    job = (ROOT / "flink/job.py").read_text(encoding="utf-8")
+    from logic import keyby_lab_enabled
 
-    assert 'os.getenv("ENABLE_KEYBY_LAB", "false")' in job
-    assert "if ENABLE_KEYBY_LAB:" in job
-
-
-def test_keyby_make_targets_use_the_controlled_workload() -> None:
-    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-
-    for target in (
-        "keyby-on",
-        "keyby-off",
-        "flink-reset",
-        "keyby-savepoint",
-        "keyby-rebuild",
-        "keyby-submit",
-        "produce-keyby",
-        "observe-keyby",
-        "verify-keyby",
-        "keyby-logs",
-    ):
-        assert f"{target}:" in makefile
-
-    for option in (
-        "--rate 500 --count 20000",
-        "--duplicate-rate 0",
-        "--late-rate 0",
-        "--hot-tenant-rate 0.95",
-        "--bad-json-rate 0",
-        "--trace-sample-rate 0",
-    ):
-        assert option in makefile
-
-    assert "SAVEPOINT" in makefile
-    assert "scripts/keyby_lab.py" in makefile
-    assert "allowNonRestoredState" not in makefile
+    assert keyby_lab_enabled({}) is False
+    assert keyby_lab_enabled({"ENABLE_KEYBY_LAB": "false"}) is False
+    assert keyby_lab_enabled({"ENABLE_KEYBY_LAB": "true"}) is True
 
 
 def test_flink_dashboard_contains_bounded_keyby_evidence() -> None:

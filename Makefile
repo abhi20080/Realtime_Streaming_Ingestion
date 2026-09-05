@@ -1,19 +1,54 @@
 SHELL := /bin/bash
 COMPOSE := docker compose
 UV := uv
-PYTHON_DEV := $(UV) run --no-project --with pytest==8.4.2 --with PyYAML==6.0.2
+PYTHON_DEV := $(UV) run --no-project --with pytest==8.4.2 --with PyYAML==6.0.2 --with ruff==0.16.5
 CLICKHOUSE_CLIENT := $(COMPOSE) exec -T clickhouse sh -ec 'exec clickhouse-client --user "$$CLICKHOUSE_USER" --password "$$CLICKHOUSE_PASSWORD" "$$@"' sh
 KEYBY_LAB := python3 scripts/keyby_lab.py
+CREDENTIALS := python3 scripts/credentials.py
+JMX_EXPORTER_JAR := kafka/jmx_prometheus_javaagent-1.6.0.jar
+JMX_EXPORTER_URL := https://github.com/prometheus/jmx_exporter/releases/download/1.6.0/jmx_prometheus_javaagent-1.6.0.jar
 
-.PHONY: build up up-observability up-logs init submit produce-small produce-observable \
-	status observe lag dlq latency checkpoints logs validate test smoke stop reset \
+.PHONY: build up up-observability up-logs init submit produce-baseline produce-small produce-observable \
+	status observe lag dlq latency checkpoints logs complexity validate test smoke stop reset \
 	deploy teardown stop-logs keyby-savepoint keyby-rebuild keyby-submit \
 	keyby-on keyby-off flink-reset produce-keyby observe-keyby verify-keyby \
-	keyby-logs help
+	keyby-logs credentials rotate-credentials kafka-agent help
+
+# Compose parses every service environment, so create ignored local credentials
+# before any target that invokes Compose or the keyBy control script.
+build up up-observability up-logs init submit produce-baseline produce-small produce-observable \
+	status observe lag dlq latency checkpoints logs validate smoke stop reset \
+	deploy teardown stop-logs keyby-savepoint keyby-rebuild keyby-submit \
+	keyby-on keyby-off flink-reset produce-keyby observe-keyby verify-keyby \
+	keyby-logs: | .env
+
+.env:
+	@$(CREDENTIALS) generate
+
+credentials: ## Generate strong local passwords in the ignored .env file.
+	@$(CREDENTIALS) generate
+
+rotate-credentials: ## Rotate ClickHouse/Grafana passwords without deleting volumes.
+	@$(CREDENTIALS) rotate
+	$(COMPOSE) up -d --force-recreate --wait --wait-timeout 180 \
+		clickhouse jobmanager taskmanager grafana
+	@$(MAKE) --no-print-directory submit
 
 # Core lab lifecycle and regular workloads.
-build: ## Build Kafka/JMX, PyFlink, and producer images.
+build: kafka-agent ## Build Kafka/JMX, PyFlink, and producer images.
 	$(COMPOSE) --profile tools build
+
+kafka-agent: $(JMX_EXPORTER_JAR) ## Download and cache the Kafka JMX agent on the host.
+
+$(JMX_EXPORTER_JAR):
+	@set -eu; \
+		tmp=$$(mktemp "$@.tmp.XXXXXX"); \
+		trap 'rm -f "$$tmp"' EXIT; \
+		curl --fail --location --show-error --connect-timeout 20 --max-time 300 \
+			--retry 3 --retry-delay 2 --retry-max-time 1200 \
+			--output "$$tmp" "$(JMX_EXPORTER_URL)"; \
+		test -s "$$tmp"; \
+		mv "$$tmp" "$@"
 
 up: ## Start the pipeline, Prometheus, and Grafana.
 	$(COMPOSE) up -d kafka kafka-ui clickhouse jobmanager taskmanager prometheus grafana
@@ -30,6 +65,12 @@ init: ## Explicitly create and describe both Kafka topics.
 submit: ## Submit the named PyFlink job (check for an active job first).
 	$(COMPOSE) exec -T jobmanager \
 		flink run -d -py /opt/flink/usrlib/job.py
+
+produce-baseline: ## Generate 1,000 valid events with no injected anomalies.
+	$(COMPOSE) --profile tools run --rm producer \
+		--rate 100 --count 1000 --seed 7 \
+		--duplicate-rate 0 --late-rate 0 --hot-tenant-rate 0 \
+		--bad-json-rate 0 --trace-sample-rate 0
 
 produce-small: ## Generate a short valid anomaly workload.
 	$(COMPOSE) --profile tools run --rm producer \
@@ -94,7 +135,7 @@ observe: status ## Show endpoints, consumer lag, health, and latency.
 	@echo
 	@echo "Kafka Console:  http://localhost:18080"
 	@echo "Flink UI:       http://localhost:18081"
-	@echo "Grafana:        http://localhost:13000  (admin/admin by default)"
+	@echo "Grafana:        http://localhost:13000  (credentials in .env)"
 	@echo "Prometheus:     http://localhost:19090"
 	@echo "ClickHouse:     http://localhost:18123"
 	@echo "Alloy (logs):   http://localhost:22345"
@@ -133,7 +174,10 @@ logs: ## Follow logs; usage: make logs SERVICE=taskmanager.
 	$(COMPOSE) logs --tail=200 -f $(SERVICE)
 
 # Static checks, live verification, and shutdown.
-validate: ## Validate Compose, YAML, provisioning, and dashboards.
+complexity: ## Enforce cyclomatic complexity of 8 or less across all Python code.
+	$(PYTHON_DEV) ruff check --select C901 --ignore-noqa .
+
+validate: complexity ## Validate complexity, Compose, YAML, provisioning, and dashboards.
 	$(COMPOSE) config --quiet
 	$(UV) run --no-project --with PyYAML==6.0.2 python scripts/validate_configs.py
 

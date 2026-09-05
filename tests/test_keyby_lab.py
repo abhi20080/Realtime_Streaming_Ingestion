@@ -2,23 +2,16 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.keyby_lab import (
-    GraphEvidence,
-    LabError,
-    MetricEvidence,
-    active_jobs,
-    job_keyby_enabled,
-    parse_savepoint_path,
-    plan_nodes,
-    rebuild_commands,
-    require_exclusive_running_named_job,
-    require_no_active_jobs,
+from scripts.keyby_common import (
+    GraphEvidence, LabError, MetricEvidence, active_jobs, job_keyby_enabled,
+    plan_nodes, require_exclusive_running_named_job, require_no_active_jobs,
     require_one_running_named_job,
-    restore_command,
-    savepoint_command,
-    transition_pipeline,
-    verification_errors,
 )
+from scripts.keyby_control import (
+    parse_savepoint_path, rebuild_commands, restore_command, savepoint_command,
+    transition_pipeline,
+)
+from scripts.keyby_evidence import verification_errors
 
 
 JOB_NAME = "kafka-flink-clickhouse-monitoring"
@@ -140,7 +133,7 @@ def test_mode_detection_finds_operator_inside_a_chained_plan_name(
             }
         }
 
-    monkeypatch.setattr("scripts.keyby_lab.fetch_json", fake_fetch_json)
+    monkeypatch.setattr("scripts.keyby_common.fetch_json", fake_fetch_json)
 
     assert job_keyby_enabled({"jid": "job-id"})
 
@@ -153,20 +146,20 @@ def test_flink_reset_restores_the_detected_mode_without_discarding_state(
     job_lists = iter([(running,), ()])
     submitted: list[list[str]] = []
 
-    monkeypatch.setattr("scripts.keyby_lab.list_jobs", lambda: next(job_lists))
+    monkeypatch.setattr("scripts.keyby_control.list_jobs", lambda: next(job_lists))
     monkeypatch.setattr(
-        "scripts.keyby_lab.job_keyby_enabled",
+        "scripts.keyby_control.job_keyby_enabled",
         lambda *_args: current_keyby,
     )
     monkeypatch.setattr(
-        "scripts.keyby_lab.create_drained_savepoint",
+        "scripts.keyby_control.create_drained_savepoint",
         lambda *_args: "file:/opt/flink/savepoints/savepoint-reset",
     )
     monkeypatch.setattr(
-        "scripts.keyby_lab.rebuild_flink_services", lambda *_args: None
+        "scripts.keyby_control.rebuild_flink_services", lambda *_args: None
     )
     monkeypatch.setattr(
-        "scripts.keyby_lab.run_command", lambda command: submitted.append(command)
+        "scripts.keyby_control.run_command", lambda command: submitted.append(command)
     )
 
     assert transition_pipeline(None) == 0
@@ -184,17 +177,17 @@ def test_keyby_off_is_the_only_transition_that_discards_unmapped_state(
     job_lists = iter([(running,), ()])
     submitted: list[list[str]] = []
 
-    monkeypatch.setattr("scripts.keyby_lab.list_jobs", lambda: next(job_lists))
-    monkeypatch.setattr("scripts.keyby_lab.job_keyby_enabled", lambda *_args: True)
+    monkeypatch.setattr("scripts.keyby_control.list_jobs", lambda: next(job_lists))
+    monkeypatch.setattr("scripts.keyby_control.job_keyby_enabled", lambda *_args: True)
     monkeypatch.setattr(
-        "scripts.keyby_lab.create_drained_savepoint",
+        "scripts.keyby_control.create_drained_savepoint",
         lambda *_args: "file:/opt/flink/savepoints/savepoint-off",
     )
     monkeypatch.setattr(
-        "scripts.keyby_lab.rebuild_flink_services", lambda *_args: None
+        "scripts.keyby_control.rebuild_flink_services", lambda *_args: None
     )
     monkeypatch.setattr(
-        "scripts.keyby_lab.run_command", lambda command: submitted.append(command)
+        "scripts.keyby_control.run_command", lambda command: submitted.append(command)
     )
 
     assert transition_pipeline(False) == 0
@@ -210,14 +203,14 @@ def test_same_mode_switch_is_idempotent_and_does_not_stop_the_job(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     running = {"jid": "job-id", "name": JOB_NAME, "state": "RUNNING"}
-    monkeypatch.setattr("scripts.keyby_lab.list_jobs", lambda: (running,))
-    monkeypatch.setattr("scripts.keyby_lab.job_keyby_enabled", lambda *_args: True)
+    monkeypatch.setattr("scripts.keyby_control.list_jobs", lambda: (running,))
+    monkeypatch.setattr("scripts.keyby_control.job_keyby_enabled", lambda *_args: True)
 
     def unexpected_savepoint(*_args):
         raise AssertionError("an idempotent switch must not stop the running job")
 
     monkeypatch.setattr(
-        "scripts.keyby_lab.create_drained_savepoint", unexpected_savepoint
+        "scripts.keyby_control.create_drained_savepoint", unexpected_savepoint
     )
 
     assert transition_pipeline(True) == 0
@@ -229,14 +222,14 @@ def test_transition_prints_savepoint_and_recovery_before_rebuild_failure(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     running = {"jid": "job-id", "name": JOB_NAME, "state": "RUNNING"}
-    monkeypatch.setattr("scripts.keyby_lab.list_jobs", lambda: (running,))
-    monkeypatch.setattr("scripts.keyby_lab.job_keyby_enabled", lambda *_args: False)
+    monkeypatch.setattr("scripts.keyby_control.list_jobs", lambda: (running,))
+    monkeypatch.setattr("scripts.keyby_control.job_keyby_enabled", lambda *_args: False)
     monkeypatch.setattr(
-        "scripts.keyby_lab.create_drained_savepoint",
+        "scripts.keyby_control.create_drained_savepoint",
         lambda *_args: "file:/opt/flink/savepoints/savepoint-recover",
     )
     monkeypatch.setattr(
-        "scripts.keyby_lab.rebuild_flink_services",
+        "scripts.keyby_control.rebuild_flink_services",
         lambda *_args: (_ for _ in ()).throw(LabError("build failed")),
     )
 
@@ -303,7 +296,45 @@ def test_live_verification_reports_hot_owner_remote_and_parallelism_failures() -
 
     errors = verification_errors(broken_graph, broken_metrics)
 
-    assert any("parallelism" in error for error in errors)
-    assert any("exactly one positive" in error for error in errors)
-    assert any("tenant-hot owner" in error for error in errors)
-    assert any("remote shuffle rates are not zero" in error for error in errors)
+    assert errors == [
+        "keyed vertex keyed has parallelism 3, expected 4",
+        "expected exactly one positive tenant-hot state gauge, found 2 (['0', '2'])",
+        "expected the tenant-hot owner to process a majority of records; "
+        "found {'0': 100.0, '1': 100.0, '2': 100.0, '3': 100.0}",
+        "recent remote shuffle rates are not zero: {'2': 7.0}",
+    ]
+
+
+def test_live_verification_preserves_complete_error_order() -> None:
+    graph = GraphEvidence(
+        job={"jid": "job", "name": JOB_NAME, "state": "RUNNING"},
+        vertices=(),
+        keyed_vertices=(),
+        hash_edges=(),
+    )
+    metrics = MetricEvidence(
+        keyed_records={"0": 25.0},
+        hot_tenant_state={"2": 1.0, "3": 1.0},
+        local_shuffle_current={},
+        remote_shuffle_current={},
+        local_shuffle_recent={"0": 0.0},
+        remote_shuffle_recent={"0": 7.0},
+    )
+
+    errors = verification_errors(graph, metrics)
+
+    expected = "['0', '1', '2', '3']"
+    assert errors == [
+        "expected at least 2 active vertices, found 0",
+        "keyed vertex is missing",
+        "no HASH edge enters the keyed vertex",
+        f"lab_keyed_records subtasks are ['0'], expected {expected}",
+        f"lab_hot_tenant_state_count subtasks are ['2', '3'], expected {expected}",
+        f"local recent shuffle subtasks are ['0'], expected {expected}",
+        f"remote recent shuffle subtasks are ['0'], expected {expected}",
+        "expected exactly one positive tenant-hot state gauge, found 2 (['2', '3'])",
+        "expected the tenant-hot owner to process a majority of records; "
+        "found {'0': 25.0}",
+        "recent local shuffle rates contain no positive byte rate",
+        "recent remote shuffle rates are not zero: {'0': 7.0}",
+    ]

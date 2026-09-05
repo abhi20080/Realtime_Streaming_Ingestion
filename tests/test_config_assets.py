@@ -93,6 +93,33 @@ def test_flink_keeps_the_logging_api_compatible_with_its_bundled_binding() -> No
     assert "<version>1.7.36</version>" in pom
 
 
+def test_passwords_are_generated_locally_and_never_committed_as_defaults() -> None:
+    compose_text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    example_lines = (ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+    datasource = (
+        ROOT / "observability/grafana/provisioning/datasources/datasources.yml"
+    ).read_text(encoding="utf-8")
+    init_sql = (ROOT / "clickhouse/init.sql").read_text(encoding="utf-8")
+    init_users = (ROOT / "clickhouse/init-users.sh").read_text(encoding="utf-8")
+
+    password_settings = [
+        line for line in compose_text.splitlines() if "PASSWORD:" in line
+    ]
+    assert password_settings
+    assert all(":?Run make credentials first" in line for line in password_settings)
+    assert all(
+        not line.split("=", 1)[1]
+        for line in example_lines
+        if line and not line.startswith("#") and line.split("=", 1)[0].endswith("PASSWORD")
+    )
+    assert "username: $CLICKHOUSE_OBSERVER_USER" in datasource
+    assert "password: $CLICKHOUSE_OBSERVER_PASSWORD" in datasource
+    assert "IDENTIFIED WITH sha256_password BY '" not in init_sql
+    assert "{observer_password:String}" in init_users
+    assert "^[A-Za-z_][A-Za-z0-9_]*$" in init_users
+    assert "--param_observer_password" in init_users
+
+
 def test_all_dashboards_are_valid_json_with_stable_uids() -> None:
     dashboard_dir = ROOT / "observability/grafana/provisioning/dashboards"
     dashboards = []
@@ -124,6 +151,7 @@ def test_kafka_partition_log_size_query_escapes_regex_for_promql() -> None:
 def test_documented_make_targets_exist() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme += (ROOT / "docs/OPERATIONS.md").read_text(encoding="utf-8")
     for target in (
         "help",
         "deploy",
@@ -135,6 +163,7 @@ def test_documented_make_targets_exist() -> None:
         "stop-logs",
         "init",
         "submit",
+        "produce-baseline",
         "produce-small",
         "produce-observable",
         "observe",
@@ -142,32 +171,30 @@ def test_documented_make_targets_exist() -> None:
         "dlq",
         "latency",
         "checkpoints",
+        "credentials",
+        "rotate-credentials",
+        "complexity",
         "smoke",
         "reset",
     ):
         assert f"{target}:" in makefile
         assert f"make {target}" in readme
 
-    assert "flink list -r" in makefile
-    assert "grep -Fq 'kafka-flink-clickhouse-monitoring'" in makefile
-    assert "$(MAKE) --no-print-directory submit" in makefile
-    assert "teardown: ## Stop the entire lab while preserving named volumes." in makefile
-    assert "$(COMPOSE) --profile logs stop alloy loki" in makefile
 
 
 def test_flink_parallelism_and_metrics_scope_are_consistent() -> None:
-    compose_text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-
-    assert "taskmanager.numberOfTaskSlots: ${FLINK_PARALLELISM:-4}" in compose_text
-    assert "parallelism.default: ${FLINK_PARALLELISM:-4}" in compose_text
-    assert "metrics.reporter.prom.scope.variables.additional:" in compose_text
-    assert (
-        "metrics.reporter.prom.scope.variables.excludes: "
-        "job_id;task_id;task_attempt_id;task_attempt_num;operator_id;tm_id"
-        in compose_text
-    )
-    assert "execution.checkpointing.dir: file:///opt/flink/checkpoints" in compose_text
-    assert "restart-strategy.fixed-delay.attempts: 100" in compose_text
-    assert "heartbeat.timeout: 120s" in compose_text
-    assert "env.java.opts.taskmanager: -Djdk.lang.Process.launchMechanism=fork" in compose_text
-    assert "http://jobmanager:8081/taskmanagers" in compose_text
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    services = compose["services"]
+    properties = yaml.safe_load(services["jobmanager"]["environment"]["FLINK_PROPERTIES"])
+    assert services["taskmanager"]["environment"]["FLINK_PROPERTIES"] == services["jobmanager"]["environment"]["FLINK_PROPERTIES"]
+    assert properties["taskmanager.numberOfTaskSlots"] == "${FLINK_PARALLELISM:-4}"
+    assert properties["parallelism.default"] == "${FLINK_PARALLELISM:-4}"
+    assert properties["metrics.reporter.prom.scope.variables.additional"] == "lab:kafka-flink-clickhouse-monitoring"
+    assert set(properties["metrics.reporter.prom.scope.variables.excludes"].split(";")) == {
+        "job_id", "task_id", "task_attempt_id", "task_attempt_num", "operator_id", "tm_id",
+    }
+    assert properties["execution.checkpointing.dir"] == "file:///opt/flink/checkpoints"
+    assert properties["restart-strategy.fixed-delay.attempts"] == 100
+    assert properties["heartbeat.timeout"] == "120s"
+    assert properties["env.java.opts.taskmanager"] == "-Djdk.lang.Process.launchMechanism=fork"
+    assert "http://jobmanager:8081/taskmanagers" in services["taskmanager"]["healthcheck"]["test"][1]

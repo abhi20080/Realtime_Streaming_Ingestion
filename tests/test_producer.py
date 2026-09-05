@@ -3,28 +3,98 @@ from __future__ import annotations
 import io
 import json
 import random
+import signal
+import sys
+import types
 from datetime import UTC, datetime
 
 import pytest
 
-from producer.producer import (
-    EVENT_FIELDS,
-    LATE_MIN_SECONDS,
-    EventFactory,
-    PeriodicSummary,
-    ProducerStats,
-    WorkloadGenerator,
-    emit_json_log,
-    extract_tx_retries,
-    format_utc,
-    nonnegative_int,
-    positive_float,
-    probability,
-    snapshot_log_fields,
+import producer.producer as producer_module
+from producer.producer import nonnegative_int, parse_args, positive_float, run
+from producer.workload import (
+    EVENT_FIELDS, LATE_MIN_SECONDS, EventFactory, WorkloadGenerator,
+    format_utc, probability,
 )
+from producer.delivery import (
+    PeriodicSummary, ProducerStats, extract_tx_retries, snapshot_log_fields,
+)
+from producer.logging_utils import emit_json_log
 
 
 FIXED_NOW = datetime(2026, 8, 23, 12, 0, 0, tzinfo=UTC)
+
+
+class FakeKafkaMessage:
+    def topic(self) -> str:
+        return "telemetry.raw"
+
+    def partition(self) -> int:
+        return 0
+
+    def offset(self) -> int:
+        return 12
+
+
+class FakeKafkaProducer:
+    acknowledge = True
+    fail_poll = False
+    flush_remaining = 0
+    instances: list["FakeKafkaProducer"] = []
+
+    def __init__(self, config) -> None:
+        self.config = config
+        self.instances.append(self)
+
+    def __len__(self) -> int:
+        return 0
+
+    def produce(self, *, on_delivery, **_kwargs) -> None:
+        if self.acknowledge:
+            on_delivery(None, FakeKafkaMessage())
+
+    def poll(self, _timeout: float) -> None:
+        if self.fail_poll:
+            raise RuntimeError("poll failed")
+
+    def flush(self, _timeout: float) -> int:
+        return self.flush_remaining
+
+
+@pytest.fixture
+def producer_run_harness(monkeypatch: pytest.MonkeyPatch):
+    FakeKafkaProducer.acknowledge = True
+    FakeKafkaProducer.fail_poll = False
+    FakeKafkaProducer.flush_remaining = 0
+    FakeKafkaProducer.instances = []
+    monkeypatch.setitem(
+        sys.modules,
+        "confluent_kafka",
+        types.SimpleNamespace(Producer=FakeKafkaProducer),
+    )
+
+    logs: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        producer_module,
+        "emit_json_log",
+        lambda event, **fields: logs.append((event, fields)),
+    )
+    signal_calls: list[tuple[signal.Signals, object]] = []
+
+    def fake_signal(signum, handler):
+        signal_calls.append((signum, handler))
+        return f"previous-{signum}"
+
+    monkeypatch.setattr(producer_module.signal, "signal", fake_signal)
+    args = parse_args(
+        [
+            "--rate", "1000000", "--count", "1", "--duplicate-rate", "0",
+            "--late-rate", "0", "--hot-tenant-rate", "0", "--bad-json-rate", "0",
+            "--trace-sample-rate", "0", "--stats-interval", "3600",
+            "--flush-timeout-seconds", "1", "--seed", "7", "--run-id", "run-test",
+        ]
+    )
+    return args, logs, signal_calls
 
 
 def parse_timestamp(value: str) -> datetime:
@@ -203,3 +273,83 @@ def test_json_logger_emits_one_parseable_line() -> None:
         "queue_depth": 2,
         "timestamp": format_utc(FIXED_NOW),
     }
+
+
+def test_run_completes_count_and_preserves_lifecycle_logs(producer_run_harness) -> None:
+    args, logs, signal_calls = producer_run_harness
+
+    exit_code = run(args)
+
+    assert exit_code == 0
+    assert [event for event, _fields in logs] == [
+        "producer_startup",
+        "producer_flush_started",
+        "producer_final",
+    ]
+    final = logs[-1][1]
+    assert final["shutdown_reason"] == "count_completed"
+    assert final["originals_generated"] == 1
+    assert final["attempted"] == 1
+    assert final["acked"] == 1
+    assert final["reconciled"] is True
+    assert len(signal_calls) == 4
+    assert callable(signal_calls[0][1])
+    assert callable(signal_calls[1][1])
+    assert signal_calls[2][1] == f"previous-{signal.SIGINT}"
+    assert signal_calls[3][1] == f"previous-{signal.SIGTERM}"
+
+
+def test_run_reports_missing_kafka_client_as_startup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "confluent_kafka", None)
+    logs: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        producer_module,
+        "emit_json_log",
+        lambda event, **fields: logs.append((event, fields)),
+    )
+
+    exit_code = run(parse_args(["--count", "1"]))
+
+    assert exit_code == 2
+    assert logs == [
+        (
+            "producer_startup_failure",
+            {"level": "ERROR", "error": "confluent-kafka is not installed"},
+        )
+    ]
+
+
+def test_run_reports_runtime_failure_and_still_finalizes(producer_run_harness) -> None:
+    args, logs, _signal_calls = producer_run_harness
+    FakeKafkaProducer.fail_poll = True
+
+    exit_code = run(args)
+
+    assert exit_code == 1
+    assert [event for event, _fields in logs] == [
+        "producer_startup",
+        "producer_runtime_failure",
+        "producer_flush_started",
+        "producer_final",
+    ]
+    assert logs[1][1]["error_type"] == "RuntimeError"
+    assert logs[1][1]["error"] == "poll failed"
+    assert logs[-1][1]["shutdown_reason"] == "unhandled_exception"
+
+
+def test_run_counts_undelivered_flush_records_as_failure(producer_run_harness) -> None:
+    args, logs, _signal_calls = producer_run_harness
+    FakeKafkaProducer.acknowledge = False
+    FakeKafkaProducer.flush_remaining = 1
+
+    exit_code = run(args)
+
+    assert exit_code == 1
+    final = logs[-1][1]
+    assert final["attempted"] == 1
+    assert final["acked"] == 0
+    assert final["undelivered"] == 1
+    assert final["reconciled"] is True
+    assert final["level"] == "INFO"
